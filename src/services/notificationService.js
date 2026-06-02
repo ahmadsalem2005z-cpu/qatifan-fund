@@ -124,3 +124,11 @@ export function formatCurrency(amount) {
     minimumFractionDigits: 2,
   }).format(amount);
 }
+
+// ── إرسال رسائل واتساب (دالة مؤقتة حتى تفعيل Twilio) ────────
+export async function sendWhatsApp(to, message) {
+  // نطبع الرسالة في السجل (Console) لاختبار النظام محلياً وعلى Railway
+  console.log(`\n📱 [WhatsApp Mock] Message to: ${to}`);
+  console.log(`${message}\n`);
+  return { success: true };
+}

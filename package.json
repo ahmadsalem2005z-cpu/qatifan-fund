@@ -8,10 +8,17 @@
     "dev": "node --watch src/index.js"
   },
   "dependencies": {
-    "dotenv":     "^16.4.5",
-    "node-cron":  "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "node-cron": "^3.0.3",
     "nodemailer": "^6.9.13",
-    "pg":         "^8.11.5",
-    "winston":    "^3.13.0"
-  }
+    "pg": "^8.11.5",
+    "winston": "^3.13.0"
+  },
+"scripts": {
+  "start": "node src/server.js",
+  "test": "node test.js"
+}
 }

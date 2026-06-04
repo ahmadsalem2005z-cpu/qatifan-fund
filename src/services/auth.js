@@ -12,19 +12,19 @@ function generateOTP() {
 
 // الخطوة 1: طلب OTP
 export async function requestOTP(phoneNumber) {
-  // تنظيف الرقم الذكي: إزالة مفتاح الدولة (+966 أو 966) وإزالة الصفر في البداية إن وجد
+  // تنظيف الرقم الذكي
   const cleanNumber = phoneNumber.replace(/^\+?966/, '').replace(/^0/, '');
 
-  // تحقق من وجود العضو
+  // استعلام "مدرع" لتجاوز حساسية أنواع البيانات في Postgres
   const result = await query(`
-    SELECT id, full_name, phone_country_code, phone_number
+    SELECT id, full_name
     FROM members
-    WHERE phone_number::text = $1
-      AND membership_status != 'inactive'
+    WHERE CAST(phone_number AS TEXT) = $1
+      AND CAST(membership_status AS TEXT) = 'active'
   `, [cleanNumber]);
 
   if (result.rows.length === 0) {
-    throw new Error('رقم الجوال غير مسجّل في النظام');
+    throw new Error('رقم الجوال غير مسجّل في النظام أو العضوية غير نشطة');
   }
 
   const member = result.rows[0];
@@ -34,12 +34,11 @@ export async function requestOTP(phoneNumber) {
   // حفظ OTP مؤقتاً
   otpStore.set(cleanNumber, { otp, expiry, memberId: member.id });
 
-  // طباعة الرمز في شاشة Railway لتسهيل الدخول أثناء التجربة والتطوير
+  // طباعة الرمز في شاشة Railway لتسهيل الدخول
   console.log(`\n=========================================`);
   console.log(`🔐 كود الدخول للعضو ${member.full_name}: ${otp}`);
   console.log(`=========================================\n`);
 
-  // إرسال OTP عبر واتساب (تم وضعها داخل try-catch لكي لا يتعطل النظام إذا لم يكن الواتساب مفصلاً بعد)
   try {
     await sendWhatsApp(
       phoneNumber,
@@ -54,7 +53,6 @@ export async function requestOTP(phoneNumber) {
 
 // الخطوة 2: التحقق من OTP وإصدار Token
 export async function verifyOTP(phoneNumber, otp) {
-  // تنظيف الرقم بنفس الطريقة للمطابقة
   const cleanNumber = phoneNumber.replace(/^\+?966/, '').replace(/^0/, '');
 
   const stored = otpStore.get(cleanNumber);

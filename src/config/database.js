@@ -1,65 +1,24 @@
-/**
- * config/database.js
- * اتصال PostgreSQL عبر Connection Pool
- * يدعم المعاملات (Transactions) ويُغلق الاتصال عند الخطأ تلقائياً
- */
-
 import pg from 'pg';
-import { logger } from '../utils/logger.js';
+import 'dotenv/config';
 
 const { Pool } = pg;
 
+console.log("🔌 جاري إعداد الاتصال بقاعدة البيانات...");
+console.log("🔗 حالة الرابط:", process.env.DATABASE_URL ? "موجود ✅" : "غير موجود ❌");
+
+// إعداد الاتصال المبسط والمناسب لبيئة Railway الداخلية
 const pool = new Pool({
-  host:     process.env.DB_HOST     || 'localhost',
-  port:     parseInt(process.env.DB_PORT) || 5432,
-  database: process.env.DB_NAME     || 'qatifan_fund',
-  user:     process.env.DB_USER     || 'postgres',
-  password: process.env.DB_PASSWORD,
-  max:      20,          // أقصى عدد اتصالات متزامنة
-  idleTimeoutMillis:    30_000,
-  connectionTimeoutMillis: 5_000,
+  connectionString: process.env.DATABASE_URL,
+  // قمنا بإلغاء SSL لأن Railway داخلياً لا يحتاجه وقد يسبب رفض الاتصال
 });
 
-pool.on('error', (err) => {
-  logger.error('خطأ غير متوقع في pool الاتصالات', { error: err.message });
-});
-
-/**
- * تنفيذ استعلام عادي
- * @param {string} text  - نص SQL
- * @param {Array}  params - المعاملات
- */
-export async function query(text, params = []) {
-  const start = Date.now();
+export const query = async (text, params) => {
   try {
-    const result = await pool.query(text, params);
-    logger.debug('SQL query', { duration: Date.now() - start, rows: result.rowCount });
-    return result;
-  } catch (err) {
-    logger.error('فشل تنفيذ الاستعلام', { query: text, params, error: err.message });
-    throw err;
+    return await pool.query(text, params);
+  } catch (error) {
+    // طباعة الخطأ العاري تماماً بدون أي فلاتر لمعرفة السبب الجذري
+    console.log('\n❌ انهيار في قاعدة البيانات - التفاصيل الحقيقية:');
+    console.dir(error); 
+    throw error;
   }
-}
-
-/**
- * تنفيذ عمليات داخل معاملة (Transaction) مع Rollback تلقائي عند الفشل
- * @param {Function} fn - دالة تستقبل client وتنفّذ العمليات
- * @returns نتيجة الدالة
- */
-export async function withTransaction(fn) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await fn(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (err) {
-    await client.query('ROLLBACK');
-    logger.error('تم تراجع المعاملة (Rollback)', { error: err.message });
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-
-export default pool;
+};

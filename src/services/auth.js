@@ -12,13 +12,16 @@ function generateOTP() {
 
 // الخطوة 1: طلب OTP
 export async function requestOTP(phoneNumber) {
+  // تنظيف الرقم الذكي: إزالة مفتاح الدولة (+966 أو 966) وإزالة الصفر في البداية إن وجد
+  const cleanNumber = phoneNumber.replace(/^\+?966/, '').replace(/^0/, '');
+
   // تحقق من وجود العضو
   const result = await query(`
     SELECT id, full_name, phone_country_code, phone_number
     FROM members
-    WHERE phone_country_code || phone_number = $1
+    WHERE phone_number::text = $1
       AND membership_status != 'inactive'
-  `, [phoneNumber]);
+  `, [cleanNumber]);
 
   if (result.rows.length === 0) {
     throw new Error('رقم الجوال غير مسجّل في النظام');
@@ -29,29 +32,41 @@ export async function requestOTP(phoneNumber) {
   const expiry = Date.now() + 5 * 60 * 1000; // 5 دقائق
 
   // حفظ OTP مؤقتاً
-  otpStore.set(phoneNumber, { otp, expiry, memberId: member.id });
+  otpStore.set(cleanNumber, { otp, expiry, memberId: member.id });
 
-  // إرسال OTP عبر واتساب
-  await sendWhatsApp(
-    phoneNumber,
-    `رمز التحقق الخاص بكم في صندوق عائلة قطيفان:\n\n*${otp}*\n\nصالح لمدة 5 دقائق. لا تشاركه مع أحد.`
-  );
+  // طباعة الرمز في شاشة Railway لتسهيل الدخول أثناء التجربة والتطوير
+  console.log(`\n=========================================`);
+  console.log(`🔐 كود الدخول للعضو ${member.full_name}: ${otp}`);
+  console.log(`=========================================\n`);
+
+  // إرسال OTP عبر واتساب (تم وضعها داخل try-catch لكي لا يتعطل النظام إذا لم يكن الواتساب مفصلاً بعد)
+  try {
+    await sendWhatsApp(
+      phoneNumber,
+      `رمز التحقق الخاص بكم في صندوق عائلة قطيفان:\n\n*${otp}*\n\nصالح لمدة 5 دقائق. لا تشاركه مع أحد.`
+    );
+  } catch (error) {
+    console.warn('⚠️ تعذر إرسال رسالة الواتساب، يرجى مراجعة إعدادات خدمة الإشعارات.');
+  }
 
   return { success: true, message: 'تم إرسال رمز التحقق' };
 }
 
 // الخطوة 2: التحقق من OTP وإصدار Token
 export async function verifyOTP(phoneNumber, otp) {
-  const stored = otpStore.get(phoneNumber);
+  // تنظيف الرقم بنفس الطريقة للمطابقة
+  const cleanNumber = phoneNumber.replace(/^\+?966/, '').replace(/^0/, '');
+
+  const stored = otpStore.get(cleanNumber);
   if (!stored) throw new Error('لم يتم طلب رمز تحقق لهذا الرقم');
   if (Date.now() > stored.expiry) {
-    otpStore.delete(phoneNumber);
+    otpStore.delete(cleanNumber);
     throw new Error('انتهت صلاحية رمز التحقق — اطلب رمزاً جديداً');
   }
   if (stored.otp !== otp) throw new Error('رمز التحقق غير صحيح');
 
   // حذف OTP بعد الاستخدام
-  otpStore.delete(phoneNumber);
+  otpStore.delete(cleanNumber);
 
   // جلب بيانات العضو
   const result = await query(`

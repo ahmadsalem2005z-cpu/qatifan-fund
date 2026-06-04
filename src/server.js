@@ -11,6 +11,9 @@ import { scheduleMonthlyCron } from './jobs/generateMonthlyDues.js';
 import { scheduleReminderCron } from './jobs/sendAutomatedReminders.js';
 import { logger } from './utils/logger.js';
 
+// استدعاء أداة رفع الصور من Cloudinary
+import upload from './config/cloudinary.js';
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -37,6 +40,23 @@ app.post('/auth/verify-otp', async (req, res) => {
 });
 
 // ── Fund Routes ─────────────────────────────────────
+
+// مسار رفع إيصالات التحويل (جديد)
+app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'لم يتم العثور على صورة لرفعها' });
+    }
+    res.status(200).json({
+      message: 'تم رفع الإيصال بنجاح',
+      url: req.file.path // الرابط الآمن للصورة من Cloudinary
+    });
+  } catch (err) {
+    logger.error('Upload error details:', err);
+    res.status(500).json({ error: 'حدث خطأ داخلي أثناء رفع الإيصال للسحابة' });
+  }
+});
+
 app.get('/api/fund/balance', verifyToken, async (req, res) => {
   const result = await query('SELECT * FROM v_fund_balance');
   res.json(result.rows[0]);

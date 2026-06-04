@@ -42,7 +42,7 @@ app.post('/auth/verify-otp', async (req, res) => {
 // ── Fund Routes ─────────────────────────────────────
 
 // مسار رفع إيصالات التحويل (جديد)
-app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), (req, res) => {
+app.post('/api/upload-receipt', upload.single('receipt'), (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'لم يتم العثور على صورة لرفعها' });

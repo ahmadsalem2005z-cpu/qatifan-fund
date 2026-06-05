@@ -145,6 +145,7 @@ app.get('/api/admin/pending-receipts', async (req, res) => {
   }
 });
 
+// ── مسار الاعتماد المحدث (قيمة الاشتراك 5 د.أ) ──
 app.post('/api/admin/approve-receipt/:id', async (req, res) => {
   try {
     const receiptId = req.params.id;
@@ -156,18 +157,33 @@ app.post('/api/admin/approve-receipt/:id', async (req, res) => {
 
     const currentMonth = new Date().getMonth() + 1; 
     const currentYear = new Date().getFullYear();
-    await query(`
-      INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
-      VALUES ($1, $2, $3, 150.00, 'paid', CURRENT_TIMESTAMP)
-    `, [memberId, currentYear, currentMonth]);
+    const DUES_AMOUNT = 5.00; // قيمة السداد 5 د.أ
 
-    res.json({ message: 'تم الاعتماد بنجاح' });
+    // التحقق: هل يوجد اشتراك "غير مدفوع" أنشأه نظام Cron مسبقاً؟
+    const subRes = await query(`SELECT id FROM subscriptions WHERE member_id = $1 AND subscription_month = $2 AND subscription_year = $3`, [memberId, currentMonth, currentYear]);
+    
+    if (subRes.rows.length > 0) {
+      // تحديثه إلى مدفوع
+      await query(`UPDATE subscriptions SET status = 'paid', payment_date = CURRENT_TIMESTAMP, amount = $1 WHERE id = $2`, [DUES_AMOUNT, subRes.rows[0].id]);
+    } else {
+      // إنشاء سجل جديد في حال الدفع المبكر
+      await query(`
+        INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
+        VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)
+      `, [memberId, currentYear, currentMonth, DUES_AMOUNT]);
+    }
+
+    // إنقاص 5 د.أ من الذمة المستحقة للعضو (لا تقل عن 0)
+    await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0) WHERE id = $2`, [DUES_AMOUNT, memberId]);
+
+    res.json({ message: 'تم الاعتماد وتحديث الحسابات بنجاح' });
   } catch (error) {
+    console.error("خطأ في الاعتماد:", error);
     res.status(500).json({ error: 'تعذر الاعتماد' });
   }
 });
 
-// مسار رفض الإيصال الجديد
+// مسار رفض الإيصال
 app.post('/api/admin/reject-receipt/:id', async (req, res) => {
   try {
     const receiptId = req.params.id;
@@ -220,7 +236,6 @@ app.get('/api/admin/reports/members', async (req, res) => {
 
 // ── Requests System Routes ────────────────────────────────────
 
-// 1. Member submits a new request
 app.post('/api/requests', verifyToken, async (req, res) => {
   const { type, amount, reason, timing, repay } = req.body;
   const memberId = req.member.memberId; 
@@ -238,7 +253,6 @@ app.post('/api/requests', verifyToken, async (req, res) => {
   }
 });
 
-// 2. Admin fetches all requests
 app.get('/api/admin/requests', async (req, res) => {
   try {
     const result = await query(`
@@ -253,7 +267,6 @@ app.get('/api/admin/requests', async (req, res) => {
   }
 });
 
-// 3. Admin updates request status & Financials
 app.put('/api/admin/requests/:id', async (req, res) => {
   const { status } = req.body; 
   const requestId = req.params.id;
@@ -299,9 +312,8 @@ app.put('/api/admin/requests/:id', async (req, res) => {
   }
 });
 
-// ── Announcements Routes (New) ────────────────────────────────────
+// ── Announcements Routes ────────────────────────────────────
 
-// 1. مسار جلب الإعلانات الحية (للأعضاء والمدير)
 app.get('/api/announcements', async (req, res) => {
   try {
     const result = await query(`SELECT id, title, body, type, created_at FROM announcements ORDER BY created_at DESC`);
@@ -318,7 +330,6 @@ app.get('/api/announcements', async (req, res) => {
   }
 });
 
-// 2. مسار نشر إعلان جديد (خاص بالمدير)
 app.post('/api/admin/announcements', async (req, res) => {
   try {
     const { title, body, type } = req.body;
@@ -338,4 +349,9 @@ app.post('/api/admin/announcements', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
+  
+  // تشغيل نظام الجدولة التلقائية بمجرد إقلاع السيرفر
+  if(typeof scheduleMonthlyCron === 'function') {
+      scheduleMonthlyCron();
+  }
 });

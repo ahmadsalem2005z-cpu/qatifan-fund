@@ -167,6 +167,17 @@ app.post('/api/admin/approve-receipt/:id', async (req, res) => {
   }
 });
 
+// مسار رفض الإيصال الجديد
+app.post('/api/admin/reject-receipt/:id', async (req, res) => {
+  try {
+    const receiptId = req.params.id;
+    await query(`UPDATE pending_receipts SET status = 'rejected' WHERE id = $1`, [receiptId]);
+    res.json({ message: 'تم رفض الإيصال' });
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر رفض الإيصال' });
+  }
+});
+
 app.post('/api/admin/expenses', async (req, res) => {
   try {
     const { category, label, amount } = req.body;
@@ -244,11 +255,10 @@ app.get('/api/admin/requests', async (req, res) => {
 
 // 3. Admin updates request status & Financials
 app.put('/api/admin/requests/:id', async (req, res) => {
-  const { status } = req.body; // 'approved' أو 'rejected'
+  const { status } = req.body; 
   const requestId = req.params.id;
 
   try {
-    // 1. جلب بيانات الطلب قبل التحديث لمعرفة النوع والمبلغ والعضو
     const requestData = await query(`SELECT * FROM requests WHERE id = $1`, [requestId]);
     if (requestData.rows.length === 0) {
       return res.status(404).json({ error: 'الطلب غير موجود' });
@@ -256,17 +266,13 @@ app.put('/api/admin/requests/:id', async (req, res) => {
     
     const reqInfo = requestData.rows[0];
 
-    // 2. تحديث حالة الطلب في قاعدة البيانات
     await query(`
       UPDATE requests 
       SET status = $1 
       WHERE id = $2
     `, [status, requestId]);
 
-    // 3. تحديث الحسابات المالية إذا تم "القبول" ولم يكن الطلب مقبولاً من قبل
     if (status === 'approved' && reqInfo.status !== 'approved') {
-      
-      // أ) تسجيل المصروف لخصمه من الصندوق
       let expenseLabel = '';
       if (reqInfo.type === 'loan') expenseLabel = `صرف سلفة للعضو`;
       else if (reqInfo.type === 'help') expenseLabel = `صرف مساعدة مالية`;
@@ -278,7 +284,6 @@ app.put('/api/admin/requests/:id', async (req, res) => {
         [reqInfo.type, expenseLabel, reqInfo.amount]
       );
 
-      // ب) إذا كان الطلب "سلفة"، يتم إضافة المبلغ كدين على حساب العضو
       if (reqInfo.type === 'loan') {
         await query(
           `UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE id = $2`,

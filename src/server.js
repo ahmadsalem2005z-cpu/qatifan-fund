@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import bcrypt from 'bcryptjs';
 import cors from 'cors';
 import { paySubscription } from './services/paySubscription.js';
 import { loginMember, loginAdmin, verifyToken } from './services/auth.js';
@@ -342,6 +343,20 @@ app.post('/api/admin/announcements', async (req, res) => {
     res.json({ message: 'تم نشر الإعلان بنجاح' });
   } catch (error) {
     res.status(500).json({ error: 'تعذر نشر الإعلان' });
+  }
+});
+
+// ── مسار مؤقت لإصلاح كلمات المرور ──
+app.get('/api/fix-passwords', async (req, res) => {
+  try {
+    // تشفير كلمة المرور 123456
+    const hash = await bcrypt.hash('123456', 10);
+    // تحديث جميع الأعضاء ليمتلكوا الكلمة المشفرة الصحيحة
+    await query(`UPDATE members SET password_hash = $1`, [hash]);
+    
+    res.json({ success: true, message: "تمت تهيئة جميع كلمات المرور لتصبح 123456 بنجاح!" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

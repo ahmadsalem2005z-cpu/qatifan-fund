@@ -1,0 +1,47 @@
+{
+  "members": [
+    {
+      "id": "2a8190ef-dfce-4c62-a19c-65bc859e23c8",
+      "full_name": "Mohammad Hatem Qtaifan",
+      "national_id": "2392019564",
+      "phone_country_code": "+962",
+      "phone_number": "0777496900",
+      "email": "mhmsbq@gmail.com",
+      "membership_status": "active",
+      "join_date": "2026-05-31T21:00:00.000Z",
+      "monthly_subscription_amount": "5.00",
+      "total_debt": "0.00",
+      "notes": "Super Hero",
+      "created_at": "2026-05-31T21:00:00.000Z",
+      "updated_at": "2026-05-31T21:00:00.000Z"
+    },
+    {
+      "id": "b81a0cd4-3811-4b12-a679-a53d41a21edc",
+      "full_name": "Ahmad Hatem Qtaifan",
+      "national_id": "9900990099",
+      "phone_country_code": "+692",
+      "phone_number": "0796778427",
+      "email": "kashal88@gmail.com",
+      "membership_status": "active",
+      "join_date": "2026-05-31T21:00:00.000Z",
+      "monthly_subscription_amount": "5.00",
+      "total_debt": "153.00",
+      "notes": "Super 7omar",
+      "created_at": "2026-05-31T21:00:00.000Z",
+      "updated_at": "2026-05-31T21:00:00.000Z"
+    }
+  ],
+  "subscriptions": [],
+  "expenses": [],
+  "requests": [],
+  "announcements": [
+    {
+      "id": 1,
+      "title": "Family meeting",
+      "body": "Family meeting\n07-06-2026",
+      "type": "meeting",
+      "created_at": "2026-06-05T17:42:16.124Z"
+    }
+  ],
+  "pending_receipts": []
+}

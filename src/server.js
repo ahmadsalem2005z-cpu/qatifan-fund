@@ -119,7 +119,14 @@ app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (re
     if (!req.file) return res.status(400).json({ error: 'لم يتم العثور على صورة لرفعها' });
     const receiptUrl = req.file.path; 
     const memberId = req.member.memberId; 
-    await query(`INSERT INTO pending_receipts (member_id, receipt_url) VALUES ($1, $2)`, [memberId, receiptUrl]);
+    // استقبال الشهر والسنة من الواجهة
+    const targetMonth = req.body.month || (new Date().getMonth() + 1);
+    const targetYear = req.body.year || new Date().getFullYear();
+
+    await query(
+      `INSERT INTO pending_receipts (member_id, receipt_url, target_month, target_year) VALUES ($1, $2, $3, $4)`, 
+      [memberId, receiptUrl, targetMonth, targetYear]
+    );
     res.status(200).json({ message: 'تم الرفع بنجاح', url: receiptUrl });
   } catch (err) {
     res.status(500).json({ error: 'حدث خطأ داخلي' });
@@ -129,51 +136,56 @@ app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (re
 app.get('/api/admin/pending-receipts', async (req, res) => {
   try {
     const result = await query(`
-      SELECT pr.id, pr.receipt_url AS image, pr.created_at AS date, 
+      SELECT pr.id, pr.receipt_url AS image, pr.created_at AS date, pr.target_month, pr.target_year,
              m.full_name AS "memberName", m.monthly_subscription_amount AS amount
       FROM pending_receipts pr
       JOIN members m ON pr.member_id = m.id
       WHERE pr.status = 'pending' ORDER BY pr.created_at DESC
     `);
-    const formattedReceipts = result.rows.map(r => ({
-      ...r, date: new Date(r.date).toLocaleDateString('ar-JO', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', numberingSystem: 'latn' }),
-      months: "مراجعة الدفعة الشهريّة"
-    }));
+    
+    const monthNames = ["", "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"];
+    
+    const formattedReceipts = result.rows.map(r => {
+      const mName = r.target_month ? monthNames[r.target_month] : "الحالي";
+      const yName = r.target_year || "";
+      return {
+        ...r, 
+        date: new Date(r.date).toLocaleDateString('ar-JO', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', numberingSystem: 'latn' }),
+        months: `دفعة شهر ${mName} ${yName}` // سيظهر للمدير اسم الشهر والسنة
+      };
+    });
     res.json(formattedReceipts);
   } catch (error) {
     res.status(500).json({ error: 'تعذر جلب الإيصالات' });
   }
 });
 
-// ── مسار الاعتماد المحدث (قيمة الاشتراك 5 د.أ) ──
 app.post('/api/admin/approve-receipt/:id', async (req, res) => {
   try {
     const receiptId = req.params.id;
-    const receiptRes = await query(`SELECT member_id FROM pending_receipts WHERE id = $1`, [receiptId]);
+    const receiptRes = await query(`SELECT member_id, target_month, target_year FROM pending_receipts WHERE id = $1`, [receiptId]);
     if (receiptRes.rows.length === 0) return res.status(404).json({error: 'الإيصال غير موجود'});
-    const memberId = receiptRes.rows[0].member_id;
+    
+    const { member_id: memberId, target_month, target_year } = receiptRes.rows[0];
 
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
 
-    const currentMonth = new Date().getMonth() + 1; 
-    const currentYear = new Date().getFullYear();
-    const DUES_AMOUNT = 5.00; // قيمة السداد 5 د.أ
+    // استخدام الشهر المرفق مع الإيصال (أو الشهر الحالي كبديل)
+    const currentMonth = target_month || (new Date().getMonth() + 1); 
+    const currentYear = target_year || new Date().getFullYear();
+    const DUES_AMOUNT = 5.00;
 
-    // التحقق: هل يوجد اشتراك "غير مدفوع" أنشأه نظام Cron مسبقاً؟
     const subRes = await query(`SELECT id FROM subscriptions WHERE member_id = $1 AND subscription_month = $2 AND subscription_year = $3`, [memberId, currentMonth, currentYear]);
     
     if (subRes.rows.length > 0) {
-      // تحديثه إلى مدفوع
       await query(`UPDATE subscriptions SET status = 'paid', payment_date = CURRENT_TIMESTAMP, amount = $1 WHERE id = $2`, [DUES_AMOUNT, subRes.rows[0].id]);
     } else {
-      // إنشاء سجل جديد في حال الدفع المبكر
       await query(`
         INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
         VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)
       `, [memberId, currentYear, currentMonth, DUES_AMOUNT]);
     }
 
-    // إنقاص 5 د.أ من الذمة المستحقة للعضو (لا تقل عن 0)
     await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0) WHERE id = $2`, [DUES_AMOUNT, memberId]);
 
     res.json({ message: 'تم الاعتماد وتحديث الحسابات بنجاح' });

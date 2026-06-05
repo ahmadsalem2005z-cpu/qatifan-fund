@@ -13,7 +13,22 @@ import { logger } from './utils/logger.js';
 import upload from './config/cloudinary.js';
 
 const app = express();
-app.use(cors());
+// استبدل الروابط بالروابط الفعلية التي حصلت عليها من Vercel
+const allowedOrigins = [
+  'https://qatifan-member.vercel.app', 
+  'https://qatifan-admin.vercel.app'
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
+}));
 app.use(express.json());
 
 // ── Auth Routes ─────────────────────────────────────

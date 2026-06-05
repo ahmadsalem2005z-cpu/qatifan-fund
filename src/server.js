@@ -231,6 +231,6 @@ app.get('/api/member/account', verifyToken, async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
-  scheduleMonthlyCron();
-  scheduleReminderCron();
+  // scheduleMonthlyCron();
+  // scheduleReminderCron();
 });

@@ -191,6 +191,24 @@ app.get('/api/member/account', verifyToken, async (req, res) => {
   res.json(result.rows[0]);
 });
 
+// 7. مسار التقارير (تصدير بيانات الأعضاء)
+app.get('/api/admin/reports/members', async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT m.full_name, m.phone_number, m.total_debt, m.membership_status,
+             COALESCE(SUM(s.amount), 0) as total_paid
+      FROM members m
+      LEFT JOIN subscriptions s ON m.id = s.member_id AND s.status = 'paid'
+      GROUP BY m.id
+      ORDER BY m.full_name
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching report:', error);
+    res.status(500).json({ error: 'تعذر جلب التقرير' });
+  }
+});
+
 // ── Start Server ────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

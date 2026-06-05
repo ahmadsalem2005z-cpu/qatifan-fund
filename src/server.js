@@ -13,22 +13,26 @@ import { logger } from './utils/logger.js';
 import upload from './config/cloudinary.js';
 
 const app = express();
-// استبدل الروابط بالروابط الفعلية التي حصلت عليها من Vercel
+
+// ── CORS Configuration ─────────────────────────────────────
 const allowedOrigins = [
   'https://qatifan-member.vercel.app', 
-  'https://qatifan-admin.vercel.app'
+  'https://qatifan-admin.vercel.app',
+  'http://localhost:5173' // لإتاحة التطوير المحلي
 ];
 
 app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true
+  credentials: true,
+  optionsSuccessStatus: 200
 }));
+
 app.use(express.json());
 
 // ── Auth Routes ─────────────────────────────────────
@@ -54,7 +58,6 @@ app.post('/auth/verify-otp', async (req, res) => {
 
 // ── Fund Routes ─────────────────────────────────────
 
-// 1. مسار ملخص الصندوق (محدث ليقرأ المصروفات الحقيقية)
 app.get('/api/fund/summary', verifyToken, async (req, res) => {
   try {
     const membersResult = await query(`SELECT COUNT(*) as count FROM members WHERE membership_status = 'active'`);
@@ -77,14 +80,11 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
     const expectedCount = activeMembers;
     const paidPct = expectedCount > 0 ? Math.round((paidCount / expectedCount) * 100) : 0;
 
-    // --- الجديد: قراءة المصروفات الحقيقية من قاعدة البيانات ---
     const expensesSumResult = await query(`SELECT SUM(amount) as total FROM expenses`);
     const totalExpenses = parseFloat(expensesSumResult.rows[0].total) || 0;
 
-    // الرصيد الفعلي = الدخل - المصروفات
     const balance = totalIncome - totalExpenses;
 
-    // جلب آخر 5 مصروفات وعرضها
     const recentExpensesResult = await query(`
       SELECT category AS cat, label, amount, expense_date AS date
       FROM expenses
@@ -115,7 +115,6 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
   }
 });
 
-// 2. مسار رفع إيصالات التحويل
 app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'لم يتم العثور على صورة لرفعها' });
@@ -128,7 +127,6 @@ app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (re
   }
 });
 
-// 3. مسار جلب الإيصالات المعلقة
 app.get('/api/admin/pending-receipts', async (req, res) => {
   try {
     const result = await query(`
@@ -148,7 +146,6 @@ app.get('/api/admin/pending-receipts', async (req, res) => {
   }
 });
 
-// 4. مسار اعتماد الدفعة 
 app.post('/api/admin/approve-receipt/:id', async (req, res) => {
   try {
     const receiptId = req.params.id;
@@ -171,7 +168,6 @@ app.post('/api/admin/approve-receipt/:id', async (req, res) => {
   }
 });
 
-// 5. مسار إضافة مصروف جديد (للوحة المدير) - مسار جديد!
 app.post('/api/admin/expenses', async (req, res) => {
   try {
     const { category, label, amount } = req.body;
@@ -186,7 +182,6 @@ app.post('/api/admin/expenses', async (req, res) => {
   }
 });
 
-// 6. المسارات التشغيلية الأخرى
 app.get('/api/member/account', verifyToken, async (req, res) => {
   const result = await query(`
     SELECT m.*, json_agg(s ORDER BY s.subscription_year, s.subscription_month) as subscriptions
@@ -200,7 +195,4 @@ app.get('/api/member/account', verifyToken, async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
-  // تم إيقاف الموظف الآلي مؤقتاً لتجنب توقف السيرفر
-  // scheduleMonthlyCron();
-  // scheduleReminderCron();
 });

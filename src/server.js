@@ -41,18 +41,18 @@ app.post('/auth/verify-otp', async (req, res) => {
 
 // ── Fund Routes ─────────────────────────────────────
 
-// مسار ملخص الصندوق (الجديد)
+// 1. مسار ملخص الصندوق
 app.get('/api/fund/summary', verifyToken, async (req, res) => {
   try {
-    // 1. حساب عدد الأعضاء النشطين
+    // حساب عدد الأعضاء النشطين
     const membersResult = await query(`SELECT COUNT(*) as count FROM members WHERE membership_status = 'active'`);
     const activeMembers = parseInt(membersResult.rows[0].count) || 0;
 
-    // 2. حساب إجمالي ما تم جمعه من الاشتراكات في النظام
+    // حساب إجمالي ما تم جمعه من الاشتراكات في النظام
     const incomeResult = await query(`SELECT SUM(amount) as total_income FROM subscriptions WHERE status = 'paid'`);
     const totalIncome = parseFloat(incomeResult.rows[0].total_income) || 0;
 
-    // 3. نسبة الالتزام للشهر الحالي
+    // نسبة الالتزام للشهر الحالي
     const currentDate = new Date();
     const currentMonth = currentDate.getMonth() + 1; 
     const currentYear = currentDate.getFullYear(); 
@@ -67,13 +67,10 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
     const expectedCount = activeMembers;
     const paidPct = expectedCount > 0 ? Math.round((paidCount / expectedCount) * 100) : 0;
 
-    // 4. المصروفات (قيمة ثابتة مؤقتاً حتى ننشئ واجهة المصروفات)
+    // المصروفات الثابتة مؤقتاً لحين بناء جدول المصروفات
     const totalExpenses = 27050; 
-    
-    // الرصيد الفعلي = إجمالي الدخل - المصروفات
     const balance = totalIncome > totalExpenses ? totalIncome - totalExpenses : 47850;
 
-    // آخر المصروفات (وهمية مؤقتاً)
     const recentExpenses = [
       {icon:"💍", label:"نقوط زواج — سالم القطيفان",  amount:1000, date:"24 يونيو 2026", cat:"wedding"},
       {icon:"🕊️", label:"عزاء — والدة أحمد القطيفان", amount:500,  date:"18 يونيو 2026", cat:"condolence"},
@@ -96,22 +93,62 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
   }
 });
 
-// مسار رفع إيصالات التحويل
-app.post('/api/upload-receipt', upload.single('receipt'), (req, res) => {
+// 2. مسار رفع إيصالات التحويل وتخزينها برقم العضو (محدث)
+app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'لم يتم العثور على صورة لرفعها' });
     }
+    
+    const receiptUrl = req.file.path; // الرابط المستضاف على Cloudinary
+    const memberId = req.member.memberId; // معرف العضو المستخرج من التوكن
+
+    // إدخال سجل الإيصال المعلق في قاعدة البيانات المجانية الجديدة
+    await query(
+      `INSERT INTO pending_receipts (member_id, receipt_url) VALUES ($1, $2)`, 
+      [memberId, receiptUrl]
+    );
+
     res.status(200).json({
-      message: 'تم رفع الإيصال بنجاح',
-      url: req.file.path // الرابط الآمن للصورة من Cloudinary
+      message: 'تم رفع الإيصال بنجاح وإرساله للمراجعة',
+      url: receiptUrl
     });
   } catch (err) {
-    logger.error('Upload error details:', err);
-    res.status(500).json({ error: 'حدث خطأ داخلي أثناء رفع الإيصال للسحابة' });
+    logger.error('Upload database storage error:', err);
+    res.status(500).json({ error: 'حدث خطأ داخلي أثناء حفظ الإيصال في قاعدة البيانات' });
   }
 });
 
+// 3. مسار جلب الإيصالات المعلقة (مخصص للوحة تحكم المدير)
+app.get('/api/admin/pending-receipts', async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT 
+        pr.id, 
+        pr.receipt_url AS image, 
+        pr.created_at AS date, 
+        m.full_name AS "memberName",
+        m.monthly_subscription_amount AS amount
+      FROM pending_receipts pr
+      JOIN members m ON pr.member_id = m.id
+      WHERE pr.status = 'pending'
+      ORDER BY pr.created_at DESC
+    `);
+    
+    const formattedReceipts = result.rows.map(r => ({
+      ...r,
+      date: new Date(r.date).toLocaleDateString('ar-SA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+      months: "مراجعة الدفعة الشهريّة"
+    }));
+
+    res.json(formattedReceipts);
+  } catch (error) {
+    logger.error('Error fetching admin receipts:', error);
+    res.status(500).json({ error: 'تعذر جلب الإيصالات بانتظار الاعتماد' });
+  }
+});
+
+// 4. المسارات التشغيلية الأخرى الصندوق
 app.get('/api/fund/balance', verifyToken, async (req, res) => {
   const result = await query('SELECT * FROM v_fund_balance');
   res.json(result.rows[0]);

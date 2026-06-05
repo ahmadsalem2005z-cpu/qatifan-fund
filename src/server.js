@@ -95,7 +95,7 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
       icon: e.cat === "wedding" ? "💍" : e.cat === "condolence" ? "🕊️" : "🚨",
       label: e.label,
       amount: parseFloat(e.amount),
-      date: new Date(e.date).toLocaleDateString('ar-SA', { day: 'numeric', month: 'long', year: 'numeric' }),
+      date: new Date(e.date).toLocaleDateString('ar-JO', { day: 'numeric', month: 'long', year: 'numeric' }),
       cat: e.cat
     }));
 
@@ -137,7 +137,7 @@ app.get('/api/admin/pending-receipts', async (req, res) => {
       WHERE pr.status = 'pending' ORDER BY pr.created_at DESC
     `);
     const formattedReceipts = result.rows.map(r => ({
-      ...r, date: new Date(r.date).toLocaleDateString('ar-SA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+      ...r, date: new Date(r.date).toLocaleDateString('ar-JO', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
       months: "مراجعة الدفعة الشهريّة"
     }));
     res.json(formattedReceipts);

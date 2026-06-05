@@ -1,81 +1,35 @@
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 import { query } from '../config/database.js';
-import { sendWhatsApp } from './notificationService.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'qatifan-secret-2025';
-const otpStore = new Map(); // مؤقت — في الإنتاج استخدم Redis
 
-// توليد OTP عشوائي 6 أرقام
-function generateOTP() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
+// 1. Member Login
+export async function loginMember(username, password) {
+  const cleanUsername = username.trim();
 
-// الخطوة 1: طلب OTP
-export async function requestOTP(phoneNumber) {
-  // Use the exact number provided, just strip accidental blank spaces
-  const cleanNumber = phoneNumber.trim();
-
-  // استعلام "مدرع" لتجاوز حساسية أنواع البيانات في Postgres
   const result = await query(`
-    SELECT id, full_name
-    FROM members
-    WHERE CAST(phone_number AS TEXT) = $1
-      AND CAST(membership_status AS TEXT) = 'active'
-  `, [cleanNumber]);
+    SELECT id, full_name, email, total_debt, membership_status, password_hash
+    FROM members 
+    WHERE username = $1 AND membership_status = 'active'
+  `, [cleanUsername]);
 
   if (result.rows.length === 0) {
-    throw new Error('رقم الجوال غير مسجّل في النظام أو العضوية غير نشطة');
+    throw new Error('اسم المستخدم غير مسجل أو العضوية غير نشطة');
   }
 
   const member = result.rows[0];
-  const otp = generateOTP();
-  const expiry = Date.now() + 5 * 60 * 1000; // 5 دقائق
 
-  // حفظ OTP مؤقتاً
-  otpStore.set(cleanNumber, { otp, expiry, memberId: member.id });
-
-  // طباعة الرمز في شاشة Railway لتسهيل الدخول
-  console.log(`\n=========================================`);
-  console.log(`🔐 كود الدخول للعضو ${member.full_name}: ${otp}`);
-  console.log(`=========================================\n`);
-
-  try {
-    await sendWhatsApp(
-      phoneNumber,
-      `رمز التحقق الخاص بكم في صندوق عائلة قطيفان:\n\n*${otp}*\n\nصالح لمدة 5 دقائق. لا تشاركه مع أحد.`
-    );
-  } catch (error) {
-    console.warn('⚠️ تعذر إرسال رسالة الواتساب، يرجى مراجعة إعدادات خدمة الإشعارات.');
+  // Compare provided password with hashed password in DB
+  const isValidPassword = await bcrypt.compare(password, member.password_hash);
+  
+  if (!isValidPassword) {
+    throw new Error('كلمة المرور غير صحيحة');
   }
 
-  return { success: true, message: 'تم إرسال رمز التحقق' };
-}
+  // Remove hash from the member object before sending it to frontend
+  delete member.password_hash;
 
-// الخطوة 2: التحقق من OTP وإصدار Token
-export async function verifyOTP(phoneNumber, otp) {
-  // Must match the exact formatting used in requestOTP
-  const cleanNumber = phoneNumber.trim();
-
-  const stored = otpStore.get(cleanNumber);
-  if (!stored) throw new Error('لم يتم طلب رمز تحقق لهذا الرقم');
-  if (Date.now() > stored.expiry) {
-    otpStore.delete(cleanNumber);
-    throw new Error('انتهت صلاحية رمز التحقق — اطلب رمزاً جديداً');
-  }
-  if (stored.otp !== otp) throw new Error('رمز التحقق غير صحيح');
-
-  // حذف OTP بعد الاستخدام
-  otpStore.delete(cleanNumber);
-
-  // جلب بيانات العضو
-  const result = await query(`
-    SELECT id, full_name, email, total_debt, membership_status
-    FROM members WHERE id = $1
-  `, [stored.memberId]);
-
-  const member = result.rows[0];
-
-  // إصدار JWT Token
   const token = jwt.sign(
     { memberId: member.id, fullName: member.full_name },
     JWT_SECRET,
@@ -85,7 +39,25 @@ export async function verifyOTP(phoneNumber, otp) {
   return { token, member };
 }
 
-// Middleware للتحقق من Token
+// 2. Admin Login
+export async function loginAdmin(username, password) {
+  // Hardcoded Admin credentials (you can move these to .env later)
+  const ADMIN_USER = process.env.ADMIN_USERNAME || 'admin';
+  const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'admin2026';
+
+  if (username === ADMIN_USER && password === ADMIN_PASS) {
+    const token = jwt.sign(
+      { role: 'admin', memberId: 'admin_001' },
+      JWT_SECRET,
+      { expiresIn: '1d' }
+    );
+    return { token };
+  }
+
+  throw new Error('بيانات الدخول الخاصة بالإدارة غير صحيحة');
+}
+
+// Middleware to verify Token
 export function verifyToken(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {

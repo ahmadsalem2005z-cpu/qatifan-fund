@@ -1,8 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { requestOTP, verifyOTP, verifyToken } from './services/auth.js';
 import { paySubscription } from './services/paySubscription.js';
+import { loginMember, loginAdmin, verifyToken } from './services/auth.js';
 import { recordExpense } from './services/recordExpense.js';
 import { reconcileBank } from './services/reconcileBank.js';
 import { generateMonthlyDues, scheduleMonthlyCron } from './jobs/generateMonthlyDues.js';
@@ -35,20 +35,20 @@ app.use(cors({
 app.use(express.json());
 
 // ── Auth Routes ─────────────────────────────────────
-app.post('/auth/request-otp', async (req, res) => {
+app.post('/auth/login', async (req, res) => {
   try {
-    const { phoneNumber } = req.body;
-    const result = await requestOTP(phoneNumber);
+    const { username, password } = req.body;
+    const result = await loginMember(username, password);
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-app.post('/auth/verify-otp', async (req, res) => {
+app.post('/auth/admin-login', async (req, res) => {
   try {
-    const { phoneNumber, otp } = req.body;
-    const result = await verifyOTP(phoneNumber, otp);
+    const { username, password } = req.body;
+    const result = await loginAdmin(username, password);
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });

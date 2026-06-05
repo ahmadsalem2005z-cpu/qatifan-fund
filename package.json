@@ -8,6 +8,7 @@
     "test": "node test.js"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "cloudinary": "^1.41.3",
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",

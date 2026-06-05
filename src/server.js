@@ -5,9 +5,8 @@ import { requestOTP, verifyOTP, verifyToken } from './services/auth.js';
 import { paySubscription } from './services/paySubscription.js';
 import { recordExpense } from './services/recordExpense.js';
 import { reconcileBank } from './services/reconcileBank.js';
-import { generateMonthlyDues } from './jobs/generateMonthlyDues.js';
+import { generateMonthlyDues, scheduleMonthlyCron } from './jobs/generateMonthlyDues.js';
 import { query } from './config/database.js';
-import { scheduleMonthlyCron } from './jobs/generateMonthlyDues.js';
 import { scheduleReminderCron } from './jobs/sendAutomatedReminders.js';
 import { logger } from './utils/logger.js';
 import upload from './config/cloudinary.js';
@@ -91,7 +90,6 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
       ORDER BY expense_date DESC LIMIT 5
     `);
     
-    // التعديل هنا لضمان أرقام 1,2,3
     const recentExpenses = recentExpensesResult.rows.map(e => ({
       icon: e.cat === "wedding" ? "💍" : e.cat === "condolence" ? "🕊️" : "🚨",
       label: e.label,
@@ -206,6 +204,59 @@ app.get('/api/admin/reports/members', async (req, res) => {
   } catch (error) {
     console.error('Error fetching report:', error);
     res.status(500).json({ error: 'تعذر جلب التقرير' });
+  }
+});
+
+// ── Requests System Routes (New) ────────────────────────────────────
+
+// 1. Member submits a new request
+app.post('/api/requests', verifyToken, async (req, res) => {
+  const { type, amount, reason, timing, repay } = req.body;
+  const memberId = req.member.memberId; 
+
+  try {
+    await query(`
+      INSERT INTO requests (member_id, type, amount, reason, timing, repayment_plan)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [memberId, type, amount, reason, timing, repay]);
+
+    res.status(201).json({ success: true, message: 'تم استلام الطلب بنجاح' });
+  } catch (error) {
+    console.error("خطأ في حفظ الطلب:", error);
+    res.status(500).json({ error: 'حدث خطأ أثناء حفظ الطلب' });
+  }
+});
+
+// 2. Admin fetches all requests
+app.get('/api/admin/requests', async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT r.*, m.full_name, m.phone_number 
+      FROM requests r
+      JOIN members m ON r.member_id = m.id
+      ORDER BY r.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر جلب الطلبات' });
+  }
+});
+
+// 3. Admin updates request status
+app.put('/api/admin/requests/:id', async (req, res) => {
+  const { status } = req.body; 
+  const requestId = req.params.id;
+
+  try {
+    await query(`
+      UPDATE requests 
+      SET status = $1 
+      WHERE id = $2
+    `, [status, requestId]);
+
+    res.json({ success: true, message: `تم تحديث حالة الطلب إلى ${status}` });
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر تحديث حالة الطلب' });
   }
 });
 

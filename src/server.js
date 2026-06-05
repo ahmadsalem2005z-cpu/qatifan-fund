@@ -148,7 +148,36 @@ app.get('/api/admin/pending-receipts', async (req, res) => {
   }
 });
 
-// 4. المسارات التشغيلية الأخرى الصندوق
+// 4. مسار اعتماد الدفعة من قبل المدير (المسار الجديد الذي تم إضافته)
+app.post('/api/admin/approve-receipt/:id', async (req, res) => {
+  try {
+    const receiptId = req.params.id;
+    
+    // 1. جلب بيانات الإيصال لمعرفة من هو العضو
+    const receiptRes = await query(`SELECT member_id FROM pending_receipts WHERE id = $1`, [receiptId]);
+    if (receiptRes.rows.length === 0) return res.status(404).json({error: 'الإيصال غير موجود'});
+    const memberId = receiptRes.rows[0].member_id;
+
+    // 2. تحديث حالة الإيصال إلى "معتمد"
+    await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
+
+    // 3. إضافة دفعة الشهر الحالي إلى سجل العضو ليصبح مسدداً
+    const currentMonth = new Date().getMonth() + 1; 
+    const currentYear = new Date().getFullYear();
+    
+    await query(`
+      INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
+      VALUES ($1, $2, $3, 150.00, 'paid', CURRENT_TIMESTAMP)
+    `, [memberId, currentYear, currentMonth]);
+
+    res.json({ message: 'تم اعتماد الدفعة وتحديث حساب العضو بنجاح' });
+  } catch (error) {
+    logger.error('Error approving receipt:', error);
+    res.status(500).json({ error: 'تعذر اعتماد الإيصال' });
+  }
+});
+
+// 5. المسارات التشغيلية الأخرى الصندوق
 app.get('/api/fund/balance', verifyToken, async (req, res) => {
   const result = await query('SELECT * FROM v_fund_balance');
   res.json(result.rows[0]);

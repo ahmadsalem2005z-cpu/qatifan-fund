@@ -218,7 +218,7 @@ app.get('/api/admin/reports/members', async (req, res) => {
   }
 });
 
-// ── Requests System Routes (New) ────────────────────────────────────
+// ── Requests System Routes ────────────────────────────────────
 
 // 1. Member submits a new request
 app.post('/api/requests', verifyToken, async (req, res) => {
@@ -296,6 +296,41 @@ app.put('/api/admin/requests/:id', async (req, res) => {
   } catch (error) {
     console.error("Error updating request:", error);
     res.status(500).json({ error: 'تعذر تحديث حالة الطلب' });
+  }
+});
+
+// ── Announcements Routes (New) ────────────────────────────────────
+
+// 1. مسار جلب الإعلانات الحية (للأعضاء والمدير)
+app.get('/api/announcements', async (req, res) => {
+  try {
+    const result = await query(`SELECT id, title, body, type, created_at FROM announcements ORDER BY created_at DESC`);
+    const formatted = result.rows.map(a => ({
+      id: a.id,
+      title: a.title,
+      body: a.body,
+      type: a.type,
+      date: new Date(a.created_at).toLocaleDateString('ar-JO', { day: 'numeric', month: 'long', year: 'numeric', numberingSystem: 'latn' })
+    }));
+    res.json(formatted);
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر جلب الإعلانات' });
+  }
+});
+
+// 2. مسار نشر إعلان جديد (خاص بالمدير)
+app.post('/api/admin/announcements', async (req, res) => {
+  try {
+    const { title, body, type } = req.body;
+    if (!title || !body || !type) return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
+    
+    await query(
+      `INSERT INTO announcements (title, body, type) VALUES ($1, $2, $3)`,
+      [title, body, type]
+    );
+    res.json({ message: 'تم نشر الإعلان بنجاح' });
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر نشر الإعلان' });
   }
 });
 

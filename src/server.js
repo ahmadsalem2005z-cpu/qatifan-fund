@@ -242,20 +242,54 @@ app.get('/api/admin/requests', async (req, res) => {
   }
 });
 
-// 3. Admin updates request status
+// 3. Admin updates request status & Financials
 app.put('/api/admin/requests/:id', async (req, res) => {
-  const { status } = req.body; 
+  const { status } = req.body; // 'approved' أو 'rejected'
   const requestId = req.params.id;
 
   try {
+    // 1. جلب بيانات الطلب قبل التحديث لمعرفة النوع والمبلغ والعضو
+    const requestData = await query(`SELECT * FROM requests WHERE id = $1`, [requestId]);
+    if (requestData.rows.length === 0) {
+      return res.status(404).json({ error: 'الطلب غير موجود' });
+    }
+    
+    const reqInfo = requestData.rows[0];
+
+    // 2. تحديث حالة الطلب في قاعدة البيانات
     await query(`
       UPDATE requests 
       SET status = $1 
       WHERE id = $2
     `, [status, requestId]);
 
-    res.json({ success: true, message: `تم تحديث حالة الطلب إلى ${status}` });
+    // 3. تحديث الحسابات المالية إذا تم "القبول" ولم يكن الطلب مقبولاً من قبل
+    if (status === 'approved' && reqInfo.status !== 'approved') {
+      
+      // أ) تسجيل المصروف لخصمه من الصندوق
+      let expenseLabel = '';
+      if (reqInfo.type === 'loan') expenseLabel = `صرف سلفة للعضو`;
+      else if (reqInfo.type === 'help') expenseLabel = `صرف مساعدة مالية`;
+      else if (reqInfo.type === 'condolence') expenseLabel = `صرف مساعدة عزاء`;
+      else if (reqInfo.type === 'wedding') expenseLabel = `صرف نقوط زواج`;
+
+      await query(
+        `INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`,
+        [reqInfo.type, expenseLabel, reqInfo.amount]
+      );
+
+      // ب) إذا كان الطلب "سلفة"، يتم إضافة المبلغ كدين على حساب العضو
+      if (reqInfo.type === 'loan') {
+        await query(
+          `UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE id = $2`,
+          [reqInfo.amount, reqInfo.member_id]
+        );
+      }
+    }
+
+    res.json({ success: true, message: `تم تحديث حالة الطلب والحسابات المالية بنجاح` });
   } catch (error) {
+    console.error("Error updating request:", error);
     res.status(500).json({ error: 'تعذر تحديث حالة الطلب' });
   }
 });

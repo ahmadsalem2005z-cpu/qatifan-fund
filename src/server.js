@@ -41,7 +41,62 @@ app.post('/auth/verify-otp', async (req, res) => {
 
 // ── Fund Routes ─────────────────────────────────────
 
-// مسار رفع إيصالات التحويل (جديد)
+// مسار ملخص الصندوق (الجديد)
+app.get('/api/fund/summary', verifyToken, async (req, res) => {
+  try {
+    // 1. حساب عدد الأعضاء النشطين
+    const membersResult = await query(`SELECT COUNT(*) as count FROM members WHERE membership_status = 'active'`);
+    const activeMembers = parseInt(membersResult.rows[0].count) || 0;
+
+    // 2. حساب إجمالي ما تم جمعه من الاشتراكات في النظام
+    const incomeResult = await query(`SELECT SUM(amount) as total_income FROM subscriptions WHERE status = 'paid'`);
+    const totalIncome = parseFloat(incomeResult.rows[0].total_income) || 0;
+
+    // 3. نسبة الالتزام للشهر الحالي
+    const currentDate = new Date();
+    const currentMonth = currentDate.getMonth() + 1; 
+    const currentYear = currentDate.getFullYear(); 
+
+    const paidThisMonthResult = await query(`
+      SELECT COUNT(*) as paid_count 
+      FROM subscriptions 
+      WHERE subscription_month = $1 AND subscription_year = $2 AND status = 'paid'
+    `, [currentMonth, currentYear]);
+    
+    const paidCount = parseInt(paidThisMonthResult.rows[0].paid_count) || 0;
+    const expectedCount = activeMembers;
+    const paidPct = expectedCount > 0 ? Math.round((paidCount / expectedCount) * 100) : 0;
+
+    // 4. المصروفات (قيمة ثابتة مؤقتاً حتى ننشئ واجهة المصروفات)
+    const totalExpenses = 27050; 
+    
+    // الرصيد الفعلي = إجمالي الدخل - المصروفات
+    const balance = totalIncome > totalExpenses ? totalIncome - totalExpenses : 47850;
+
+    // آخر المصروفات (وهمية مؤقتاً)
+    const recentExpenses = [
+      {icon:"💍", label:"نقوط زواج — سالم القطيفان",  amount:1000, date:"24 يونيو 2026", cat:"wedding"},
+      {icon:"🕊️", label:"عزاء — والدة أحمد القطيفان", amount:500,  date:"18 يونيو 2026", cat:"condolence"},
+      {icon:"🚨", label:"مساعدة طارئة — علي القطيفان", amount:800,  date:"2 يونيو 2026",  cat:"emergency"},
+    ];
+
+    res.json({
+      balance,
+      activeMembers,
+      totalExpenses,
+      paidPct,
+      paidCount,
+      expectedCount,
+      recentExpenses
+    });
+
+  } catch (error) {
+    logger.error("❌ خطأ في حساب ملخص الصندوق:", error);
+    res.status(500).json({ error: "تعذر حساب ملخص الصندوق" });
+  }
+});
+
+// مسار رفع إيصالات التحويل
 app.post('/api/upload-receipt', upload.single('receipt'), (req, res) => {
   try {
     if (!req.file) {

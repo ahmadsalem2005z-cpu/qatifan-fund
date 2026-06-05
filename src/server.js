@@ -18,7 +18,7 @@ const app = express();
 const allowedOrigins = [
   'https://qatifan-member.vercel.app', 
   'https://qatifan-admin.vercel.app',
-  'http://localhost:5173' // لإتاحة التطوير المحلي
+  'http://localhost:5173'
 ];
 
 app.use(cors({
@@ -91,11 +91,12 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
       ORDER BY expense_date DESC LIMIT 5
     `);
     
+    // التعديل هنا لضمان أرقام 1,2,3
     const recentExpenses = recentExpensesResult.rows.map(e => ({
       icon: e.cat === "wedding" ? "💍" : e.cat === "condolence" ? "🕊️" : "🚨",
       label: e.label,
       amount: parseFloat(e.amount),
-      date: new Date(e.date).toLocaleDateString('ar-JO', { day: 'numeric', month: 'long', year: 'numeric' }),
+      date: new Date(e.date).toLocaleDateString('ar-JO', { day: 'numeric', month: 'long', year: 'numeric', numberingSystem: 'latn' }),
       cat: e.cat
     }));
 
@@ -137,7 +138,7 @@ app.get('/api/admin/pending-receipts', async (req, res) => {
       WHERE pr.status = 'pending' ORDER BY pr.created_at DESC
     `);
     const formattedReceipts = result.rows.map(r => ({
-      ...r, date: new Date(r.date).toLocaleDateString('ar-JO', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+      ...r, date: new Date(r.date).toLocaleDateString('ar-JO', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', numberingSystem: 'latn' }),
       months: "مراجعة الدفعة الشهريّة"
     }));
     res.json(formattedReceipts);
@@ -191,7 +192,6 @@ app.get('/api/member/account', verifyToken, async (req, res) => {
   res.json(result.rows[0]);
 });
 
-// 7. مسار التقارير (تصدير بيانات الأعضاء)
 app.get('/api/admin/reports/members', async (req, res) => {
   try {
     const result = await query(`

@@ -12,8 +12,8 @@ function generateOTP() {
 
 // الخطوة 1: طلب OTP
 export async function requestOTP(phoneNumber) {
-  // تنظيف الرقم الذكي
-  const cleanNumber = phoneNumber.replace(/^\+?966/, '').replace(/^0/, '');
+  // Use the exact number provided, just strip accidental blank spaces
+  const cleanNumber = phoneNumber.trim();
 
   // استعلام "مدرع" لتجاوز حساسية أنواع البيانات في Postgres
   const result = await query(`
@@ -53,7 +53,8 @@ export async function requestOTP(phoneNumber) {
 
 // الخطوة 2: التحقق من OTP وإصدار Token
 export async function verifyOTP(phoneNumber, otp) {
-  const cleanNumber = phoneNumber.replace(/^\+?966/, '').replace(/^0/, '');
+  // Must match the exact formatting used in requestOTP
+  const cleanNumber = phoneNumber.trim();
 
   const stored = otpStore.get(cleanNumber);
   if (!stored) throw new Error('لم يتم طلب رمز تحقق لهذا الرقم');

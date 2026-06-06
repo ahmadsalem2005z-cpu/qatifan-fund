@@ -67,7 +67,6 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
   } catch (error) { res.status(500).json({ error: "تعذر حساب ملخص الصندوق" }); }
 });
 
-// استقبال الشهر والسنة مع الصورة
 app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'لم يتم العثور على صورة لرفعها' });
@@ -79,7 +78,6 @@ app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (re
   } catch (err) { res.status(500).json({ error: 'حدث خطأ داخلي' }); }
 });
 
-// عرض الشهر والسنة للمدير
 app.get('/api/admin/pending-receipts', async (req, res) => {
   try {
     const result = await query(`
@@ -98,7 +96,7 @@ app.get('/api/admin/pending-receipts', async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'تعذر جلب الإيصالات' }); }
 });
 
-// اعتماد الدفعة بناءً على الشهر والسنة المختارين
+// اعتماد الدفعة (تم تحديث المنطق لضمان عدم الخصم من السلفة إلا إذا كان هناك دين فعلي)
 app.post('/api/admin/approve-receipt/:id', async (req, res) => {
   try {
     const receiptId = req.params.id;
@@ -106,21 +104,24 @@ app.post('/api/admin/approve-receipt/:id', async (req, res) => {
     if (receiptRes.rows.length === 0) return res.status(404).json({error: 'الإيصال غير موجود'});
     
     const { member_id: memberId, for_month, for_year } = receiptRes.rows[0];
-    await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
-
     const targetMonth = for_month || new Date().getMonth() + 1; 
     const targetYear = for_year || new Date().getFullYear();
     const DUES_AMOUNT = 5.00;
 
-    const subRes = await query(`SELECT id FROM subscriptions WHERE member_id = $1 AND subscription_month = $2 AND subscription_year = $3`, [memberId, targetMonth, targetYear]);
+    const subRes = await query(`SELECT id, status FROM subscriptions WHERE member_id = $1 AND subscription_month = $2 AND subscription_year = $3`, [memberId, targetMonth, targetYear]);
+    
     if (subRes.rows.length > 0) {
       await query(`UPDATE subscriptions SET status = 'paid', payment_date = CURRENT_TIMESTAMP, amount = $1 WHERE id = $2`, [DUES_AMOUNT, subRes.rows[0].id]);
     } else {
       await query(`INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date) VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)`, [memberId, targetYear, targetMonth, DUES_AMOUNT]);
     }
-    await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0) WHERE id = $2`, [DUES_AMOUNT, memberId]);
+
+    // الخصم فقط إذا كان لدى العضو دين فعلي (total_debt > 0)
+    await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0) WHERE id = $2 AND COALESCE(total_debt, 0) > 0`, [DUES_AMOUNT, memberId]);
+    await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
+
     res.json({ message: 'تم الاعتماد بنجاح' });
-  } catch (error) { res.status(500).json({ error: 'تعذر الاعتماد' }); }
+  } catch (error) { console.error(error); res.status(500).json({ error: 'تعذر الاعتماد' }); }
 });
 
 app.post('/api/admin/reject-receipt/:id', async (req, res) => {

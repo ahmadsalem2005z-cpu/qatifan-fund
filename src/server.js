@@ -35,7 +35,8 @@ app.use(cors({
 
 app.use(express.json());
 
-// ── Auth Routes ─────────────────────────────────────
+// ── Auth & Registration Routes ─────────────────────────────────────
+
 app.post('/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -53,6 +54,58 @@ app.post('/auth/admin-login', async (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// 1. طلب رمز OTP للتسجيل أو استعادة كلمة المرور
+app.post('/auth/request-otp', async (req, res) => {
+  try {
+    const { phone_number } = req.body;
+    if (!phone_number) return res.status(400).json({ error: "رقم الهاتف مطلوب" });
+
+    const otp = Math.floor(1000 + Math.random() * 9000).toString(); // توليد 4 أرقام
+    const expiresAt = new Date(Date.now() + 10 * 60000); // صالح لـ 10 دقائق
+
+    await query(`
+      INSERT INTO otp_verifications (phone_number, otp_code, expires_at) 
+      VALUES ($1, $2, $3)
+      ON CONFLICT (phone_number) DO UPDATE SET otp_code = $2, expires_at = $3
+    `, [phone_number, otp, expiresAt]);
+
+    // هنا يتم ربط خدمة إرسال الـ SMS لاحقاً (مثل UltraMsg أو WhatsApp API)
+    console.log(`OTP for ${phone_number} is ${otp}`); 
+    
+    res.json({ message: "تم إرسال رمز التحقق بنجاح" });
+  } catch (err) {
+    res.status(500).json({ error: "حدث خطأ أثناء طلب رمز التحقق" });
+  }
+});
+
+// 2. إتمام التسجيل بعد التحقق من OTP
+app.post('/auth/register', async (req, res) => {
+  try {
+    const { full_name, phone_number, email, password, dob, marital_status, otp } = req.body;
+    
+    // التحقق من صحة الـ OTP
+    const otpCheck = await query(`SELECT * FROM otp_verifications WHERE phone_number = $1 AND otp_code = $2 AND expires_at > NOW()`, [phone_number, otp]);
+    if (otpCheck.rows.length === 0) {
+      return res.status(400).json({ error: "رمز التحقق غير صحيح أو منتهي الصلاحية" });
+    }
+
+    // تشفير كلمة المرور وإنشاء الحساب
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    await query(`
+      INSERT INTO members (full_name, phone_number, email, password_hash, dob, marital_status, role) 
+      VALUES ($1, $2, $3, $4, $5, $6, 'member')
+    `, [full_name, phone_number, email, hashedPassword, dob, marital_status]);
+      
+    // مسح الـ OTP بعد الاستخدام الناجح
+    await query(`DELETE FROM otp_verifications WHERE phone_number = $1`, [phone_number]);
+    
+    res.json({ success: true, message: "تم إنشاء الحساب بنجاح، بانتظار تفعيل الإدارة وتحديد الذمة الأولية." });
+  } catch (err) {
+    res.status(500).json({ error: "رقم الجوال أو الإيميل مسجل مسبقاً في النظام" });
   }
 });
 
@@ -138,7 +191,7 @@ app.get('/api/admin/pending-receipts', async (req, res) => {
     `);
     const formattedReceipts = result.rows.map(r => ({
       ...r, date: new Date(r.date).toLocaleDateString('ar-JO', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', numberingSystem: 'latn' }),
-      months: "مراجعة الدفعة الشهريّة"
+      months: "مراجعة الدفعة"
     }));
     res.json(formattedReceipts);
   } catch (error) {
@@ -146,45 +199,50 @@ app.get('/api/admin/pending-receipts', async (req, res) => {
   }
 });
 
-// ── مسار الاعتماد المحدث (قيمة الاشتراك 5 د.أ) ──
+// ── مسار الاعتماد الجديد (المنطق المالي الديناميكي: 2 د.أ لكل شهر) ──
 app.post('/api/admin/approve-receipt/:id', async (req, res) => {
   try {
     const receiptId = req.params.id;
+    // استلام المبلغ الذي أدخله أو وافق عليه المدير للإيصال
+    const { amount } = req.body; 
+    
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'الرجاء تحديد المبلغ المعتمد لتحديث السجلات.' });
+    }
+
     const receiptRes = await query(`SELECT member_id FROM pending_receipts WHERE id = $1`, [receiptId]);
     if (receiptRes.rows.length === 0) return res.status(404).json({error: 'الإيصال غير موجود'});
     const memberId = receiptRes.rows[0].member_id;
 
+    // 1. تحديث حالة الإيصال إلى معتمد
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
 
-    const currentMonth = new Date().getMonth() + 1; 
-    const currentYear = new Date().getFullYear();
-    const DUES_AMOUNT = 5.00; // قيمة السداد 5 د.أ
+    // 2. حساب عدد الأشهر المغطاة بناءً على تسعيرة 2 د.أ للشهر
+    const MONTHLY_FEE = 2.00;
+    const monthsToAdvance = Math.floor(amount / MONTHLY_FEE);
 
-    // التحقق: هل يوجد اشتراك "غير مدفوع" أنشأه نظام Cron مسبقاً؟
-    const subRes = await query(`SELECT id FROM subscriptions WHERE member_id = $1 AND subscription_month = $2 AND subscription_year = $3`, [memberId, currentMonth, currentYear]);
-    
-    if (subRes.rows.length > 0) {
-      // تحديثه إلى مدفوع
-      await query(`UPDATE subscriptions SET status = 'paid', payment_date = CURRENT_TIMESTAMP, amount = $1 WHERE id = $2`, [DUES_AMOUNT, subRes.rows[0].id]);
-    } else {
-      // إنشاء سجل جديد في حال الدفع المبكر
-      await query(`
-        INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
-        VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)
-      `, [memberId, currentYear, currentMonth, DUES_AMOUNT]);
-    }
+    // 3. تحديث بيانات العضو: إنقاص الذمة، وتقديم "تاريخ آخر دفعة" للأمام
+    await query(`
+      UPDATE members 
+      SET 
+        total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0),
+        last_paid_date = COALESCE(last_paid_date, CURRENT_DATE) + interval '1 month' * $2
+      WHERE id = $3
+    `, [amount, monthsToAdvance, memberId]);
 
-    // إنقاص 5 د.أ من الذمة المستحقة للعضو (لا تقل عن 0)
-    await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0) WHERE id = $2`, [DUES_AMOUNT, memberId]);
+    // 4. إدراج الحركة في السجلات المالية (Subscriptions) لتوثيق الدخل
+    await query(`
+      INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
+      VALUES ($1, EXTRACT(YEAR FROM CURRENT_DATE), EXTRACT(MONTH FROM CURRENT_DATE), $2, 'paid', CURRENT_TIMESTAMP)
+    `, [memberId, amount]);
 
-    res.json({ message: 'تم الاعتماد وتحديث الحسابات بنجاح' });
+    res.json({ message: 'تم الاعتماد، وتم تحديث الذمة وتاريخ السداد بنجاح' });
   } catch (error) {
     console.error("خطأ في الاعتماد:", error);
     res.status(500).json({ error: 'تعذر الاعتماد' });
   }
 });
 
-// مسار رفض الإيصال
 app.post('/api/admin/reject-receipt/:id', async (req, res) => {
   try {
     const receiptId = req.params.id;
@@ -221,7 +279,7 @@ app.get('/api/member/account', verifyToken, async (req, res) => {
 app.get('/api/admin/reports/members', async (req, res) => {
   try {
     const result = await query(`
-      SELECT m.full_name, m.phone_number, m.total_debt, m.membership_status,
+      SELECT m.full_name, m.phone_number, m.total_debt, m.last_paid_date, m.membership_status,
              COALESCE(SUM(s.amount), 0) as total_paid
       FROM members m
       LEFT JOIN subscriptions s ON m.id = s.member_id AND s.status = 'paid'
@@ -346,14 +404,10 @@ app.post('/api/admin/announcements', async (req, res) => {
   }
 });
 
-// ── مسار مؤقت لإصلاح كلمات المرور ──
 app.get('/api/fix-passwords', async (req, res) => {
   try {
-    // تشفير كلمة المرور 123456
     const hash = await bcrypt.hash('123456', 10);
-    // تحديث جميع الأعضاء ليمتلكوا الكلمة المشفرة الصحيحة
     await query(`UPDATE members SET password_hash = $1`, [hash]);
-    
     res.json({ success: true, message: "تمت تهيئة جميع كلمات المرور لتصبح 123456 بنجاح!" });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -365,7 +419,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
   
-  // تشغيل نظام الجدولة التلقائية بمجرد إقلاع السيرفر
   if(typeof scheduleMonthlyCron === 'function') {
       scheduleMonthlyCron();
   }

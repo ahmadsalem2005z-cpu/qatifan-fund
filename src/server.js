@@ -111,6 +111,37 @@ app.post('/auth/register', async (req, res) => {
   }
 });
 
+// 3. إعادة تعيين كلمة المرور (نسيت كلمة المرور)
+app.post('/auth/reset-password', async (req, res) => {
+  try {
+    const { phone_number, otp, new_password } = req.body;
+
+    // التحقق من صحة الـ OTP
+    const otpCheck = await query(`SELECT * FROM otp_verifications WHERE phone_number = $1 AND otp_code = $2 AND expires_at > NOW()`, [phone_number, otp]);
+    if (otpCheck.rows.length === 0) {
+      return res.status(400).json({ error: "رمز التحقق غير صحيح أو منتهي الصلاحية" });
+    }
+
+    // تشفير كلمة المرور الجديدة
+    const hashedPassword = await bcrypt.hash(new_password, 10);
+
+    // تحديث كلمة المرور في قاعدة البيانات
+    const updateRes = await query(`UPDATE members SET password_hash = $1 WHERE phone_number = $2`, [hashedPassword, phone_number]);
+
+    if (updateRes.rowCount === 0) {
+       return res.status(404).json({ error: "رقم الجوال غير مسجل في النظام" });
+    }
+
+    // مسح الـ OTP بعد الاستخدام
+    await query(`DELETE FROM otp_verifications WHERE phone_number = $1`, [phone_number]);
+
+    res.json({ success: true, message: "تم تغيير كلمة المرور بنجاح" });
+  } catch (err) {
+    console.error("❌ خطأ في استعادة كلمة المرور:", err);
+    res.status(500).json({ error: "حدث خطأ داخلي أثناء استعادة كلمة المرور" });
+  }
+});
+
 // ── Fund Routes ─────────────────────────────────────
 
 app.get('/api/fund/summary', verifyToken, async (req, res) => {

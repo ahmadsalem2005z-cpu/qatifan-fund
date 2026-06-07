@@ -95,9 +95,10 @@ app.post('/auth/register', async (req, res) => {
     // تشفير كلمة المرور وإنشاء الحساب
     const hashedPassword = await bcrypt.hash(password, 10);
     
+    // الحل هنا: تمت إضافة حقل username وتم تمرير رقم الجوال ($2) كقيمة له
     await query(`
-      INSERT INTO members (full_name, phone_number, email, password_hash, dob, marital_status, role) 
-      VALUES ($1, $2, $3, $4, $5, $6, 'member')
+      INSERT INTO members (full_name, phone_number, email, password_hash, dob, marital_status, role, username) 
+      VALUES ($1, $2, $3, $4, $5, $6, 'member', $2)
     `, [full_name, phone_number, email, hashedPassword, dob, marital_status]);
       
     // مسح الـ OTP بعد الاستخدام الناجح
@@ -105,7 +106,8 @@ app.post('/auth/register', async (req, res) => {
     
     res.json({ success: true, message: "تم إنشاء الحساب بنجاح، بانتظار تفعيل الإدارة وتحديد الذمة الأولية." });
   } catch (err) {
-    res.status(500).json({ error: "رقم الجوال أو الإيميل مسجل مسبقاً في النظام" });
+    console.error("❌ خطأ في التسجيل:", err);
+    res.status(500).json({ error: "رقم الجوال أو الإيميل مسجل مسبقاً في النظام أو هناك خطأ في البيانات" });
   }
 });
 

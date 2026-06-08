@@ -232,7 +232,18 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     
     const memberId = receiptRes.rows[0].member_id;
     const MONTHLY_FEE = 2.00;
-    const monthsToAdvance = 1; // إيصال بدفعة شهر واحد
+    const monthsToAdvance = 1;
+
+    // استخراج تاريخ آخر دفعة للعضو لحساب الشهر التالي بشكل ديناميكي
+    const memberRes = await query(`SELECT COALESCE(last_paid_date, CURRENT_DATE) as last_paid_date FROM members WHERE id = $1`, [memberId]);
+    const currentLastPaidDate = new Date(memberRes.rows[0].last_paid_date);
+
+    // إضافة شهر واحد للحصول على تاريخ التغطية الجديد
+    const targetDate = new Date(currentLastPaidDate);
+    targetDate.setMonth(targetDate.getMonth() + 1);
+    
+    const subYear = targetDate.getFullYear();
+    const subMonth = targetDate.getMonth() + 1; // getMonth يبدأ من 0 لذلك نضيف 1
 
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
     
@@ -243,10 +254,11 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
       WHERE id = $3
     `, [MONTHLY_FEE, monthsToAdvance, memberId]);
 
+    // إدخال الحركة التفصيلية بناءً على الشهر والسنة المستخرجين
     await query(`
       INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
-      VALUES ($1, EXTRACT(YEAR FROM CURRENT_DATE), EXTRACT(MONTH FROM CURRENT_DATE), $2, 'paid', CURRENT_TIMESTAMP)
-    `, [memberId, MONTHLY_FEE]);
+      VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)
+    `, [memberId, subYear, subMonth, MONTHLY_FEE]);
 
     res.json({ message: 'تم الاعتماد' });
   } catch (error) {
@@ -265,10 +277,7 @@ app.post('/api/admin/reject-receipt/:id', verifyToken, isAdmin, async (req, res)
 
 app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
   try {
-    // الواجهة ترسل: { category, reason, amount }
     const { category, reason, amount } = req.body;
-    
-    // نمرر البيانات مباشرة لقاعدة البيانات دون وسطاء
     await query(
       `INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`,
       [category, reason, amount]

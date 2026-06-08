@@ -174,13 +174,10 @@ app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (re
     if (!req.file) return res.status(400).json({ error: 'لم يتم العثور على صورة' });
     const receiptUrl = req.file.path;
     const memberId = req.user.id;
-    const month = req.body.month || null;
-    const year = req.body.year || null;
-
-    await query(`INSERT INTO pending_receipts (member_id, receipt_url, for_month, for_year, status) VALUES ($1, $2, $3, $4, 'pending')`, [memberId, receiptUrl, month, year]);
+    await query(`INSERT INTO pending_receipts (member_id, receipt_url) VALUES ($1, $2)`, [memberId, receiptUrl]);
     res.status(200).json({ message: 'تم الرفع بنجاح', url: receiptUrl });
   } catch (err) {
-    res.status(500).json({ error: 'حدث خطأ داخلي أثناء الرفع' });
+    res.status(500).json({ error: 'حدث خطأ داخلي' });
   }
 });
 
@@ -215,7 +212,7 @@ app.get('/api/announcements', async (req, res) => {
 app.get('/api/admin/pending-receipts', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
-      SELECT pr.id, pr.receipt_url AS image_url, pr.created_at AS date, pr.for_month, pr.for_year,
+      SELECT pr.id, pr.receipt_url AS image_url, pr.created_at AS date,
              m.full_name, m.monthly_subscription_amount AS amount
       FROM pending_receipts pr
       JOIN members m ON pr.member_id = m.id
@@ -230,40 +227,37 @@ app.get('/api/admin/pending-receipts', verifyToken, isAdmin, async (req, res) =>
 app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res) => {
   try {
     const receiptId = req.params.id;
-    const receiptRes = await query(`SELECT member_id, for_month, for_year FROM pending_receipts WHERE id = $1`, [receiptId]);
+    const receiptRes = await query(`SELECT member_id FROM pending_receipts WHERE id = $1`, [receiptId]);
     if (receiptRes.rows.length === 0) return res.status(404).json({error: 'الإيصال غير موجود'});
     
-    const { member_id: memberId, for_month, for_year } = receiptRes.rows[0];
+    const memberId = receiptRes.rows[0].member_id;
     const MONTHLY_FEE = 2.00;
-    
-    let subYear = for_year;
-    let subMonth = for_month;
-    let updateLastPaidQuery = `last_paid_date = COALESCE(last_paid_date, CURRENT_DATE) + interval '1 month'`;
+    const monthsToAdvance = 1;
 
-    if (!subMonth || !subYear) {
-      // الحساب التلقائي (الشهر التالي)
-      const memberRes = await query(`SELECT COALESCE(last_paid_date, CURRENT_DATE) as last_paid_date FROM members WHERE id = $1`, [memberId]);
-      const currentLastPaidDate = new Date(memberRes.rows[0].last_paid_date);
-      currentLastPaidDate.setDate(1);
-      currentLastPaidDate.setMonth(currentLastPaidDate.getMonth() + 1);
-      
-      subYear = currentLastPaidDate.getFullYear();
-      subMonth = currentLastPaidDate.getMonth() + 1; 
-    } else {
-      // الحساب اليدوي (تحديث آخر تاريخ سداد ليكون هذا الشهر إذا كان أحدث من القديم)
-      updateLastPaidQuery = `last_paid_date = GREATEST(COALESCE(last_paid_date, CURRENT_DATE), '${subYear}-${subMonth}-01'::date)`;
-    }
+    // استخراج تاريخ آخر دفعة للعضو لحساب الشهر التالي بشكل ديناميكي
+    const memberRes = await query(`SELECT COALESCE(last_paid_date, CURRENT_DATE) as last_paid_date FROM members WHERE id = $1`, [memberId]);
+    const currentLastPaidDate = new Date(memberRes.rows[0].last_paid_date);
+
+    // ضبط اليوم على 1 لتجنب تخطي الأشهر القصيرة عند الإضافة
+    currentLastPaidDate.setDate(1);
+
+    // إضافة شهر واحد للحصول على تاريخ التغطية الجديد
+    const targetDate = new Date(currentLastPaidDate);
+    targetDate.setMonth(targetDate.getMonth() + 1);
+    
+    const subYear = targetDate.getFullYear();
+    const subMonth = targetDate.getMonth() + 1; // getMonth يبدأ من 0 لذلك نضيف 1
 
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
     
     await query(`
       UPDATE members
       SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0),
-          ${updateLastPaidQuery}
-      WHERE id = $2
-    `, [MONTHLY_FEE, memberId]);
+          last_paid_date = COALESCE(last_paid_date, CURRENT_DATE) + interval '1 month' * $2
+      WHERE id = $3
+    `, [MONTHLY_FEE, monthsToAdvance, memberId]);
 
-    // تسجيل الاشتراك الفعلي
+    // إدخال الحركة التفصيلية بناءً على الشهر والسنة المستخرجين
     await query(`
       INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
       VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)
@@ -374,19 +368,8 @@ app.get('/api/fix-passwords', async (req, res) => {
   }
 });
 
-// تهيئة قاعدة البيانات والتأكد من وجود الأعمدة الجديدة
-const initializeDB = async () => {
-  try {
-    await query(`ALTER TABLE pending_receipts ADD COLUMN IF NOT EXISTS for_month INT, ADD COLUMN IF NOT EXISTS for_year INT`);
-    logger.info("Database schema validated successfully.");
-  } catch (e) {
-    logger.error("DB Init Error:", e);
-  }
-};
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-  await initializeDB();
+app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
   if(typeof scheduleMonthlyCron === 'function') scheduleMonthlyCron();
 });

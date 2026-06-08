@@ -238,6 +238,9 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     const memberRes = await query(`SELECT COALESCE(last_paid_date, CURRENT_DATE) as last_paid_date FROM members WHERE id = $1`, [memberId]);
     const currentLastPaidDate = new Date(memberRes.rows[0].last_paid_date);
 
+    // ضبط اليوم على 1 لتجنب تخطي الأشهر القصيرة عند الإضافة
+    currentLastPaidDate.setDate(1);
+
     // إضافة شهر واحد للحصول على تاريخ التغطية الجديد
     const targetDate = new Date(currentLastPaidDate);
     targetDate.setMonth(targetDate.getMonth() + 1);

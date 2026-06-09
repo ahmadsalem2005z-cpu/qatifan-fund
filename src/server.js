@@ -133,6 +133,10 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
     const expensesSumResult = await query(`SELECT SUM(amount) as total FROM expenses`);
     const totalExpenses = parseFloat(expensesSumResult.rows[0].total) || 0;
 
+    // الميزة الجديدة: جمع كل الديون المستحقة على الأعضاء
+    const totalDebtResult = await query(`SELECT SUM(total_debt) as total_unpaid_debt FROM members WHERE membership_status = 'active'`);
+    const totalUnpaidDebt = parseFloat(totalDebtResult.rows[0].total_unpaid_debt) || 0;
+
     const balance = totalIncome - totalExpenses;
 
     const recentExpensesResult = await query(`
@@ -149,7 +153,7 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
       cat: e.cat
     }));
 
-    res.json({ balance, activeMembers, totalExpenses, paidPct, paidCount, expectedCount, recentExpenses });
+    res.json({ balance, activeMembers, totalExpenses, paidPct, paidCount, expectedCount, recentExpenses, totalUnpaidDebt });
   } catch (error) {
     res.status(500).json({ error: "تعذر حساب ملخص الصندوق" });
   }
@@ -157,9 +161,7 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
 
 app.get('/api/member/account', verifyToken, async (req, res) => {
   try {
-    // التوافقية مع جميع أشكال Token Payload
     const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId) || null;
-    
     const result = await query(`
       SELECT m.*, json_agg(s ORDER BY s.subscription_year, s.subscription_month) as subscriptions
       FROM members m LEFT JOIN subscriptions s ON s.member_id = m.id
@@ -200,26 +202,21 @@ app.post('/api/requests', verifyToken, async (req, res) => {
   }
 });
 
-// ── مسار الإعلانات המחمي والمخصص ──
 app.get('/api/announcements', verifyToken, async (req, res) => {
   try {
-    // استخراج رقم العضو بشكل قاطع مهما كانت بنية التوكن
     const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId) || null;
-    
     const result = await query(`
       SELECT id, title, body, type, created_at 
       FROM announcements 
       WHERE member_id IS NULL OR member_id = $1
       ORDER BY created_at DESC
     `, [memberId]);
-    
     const formatted = result.rows.map(a => ({
       id: a.id, title: a.title, body: a.body, type: a.type,
       date: new Date(a.created_at).toLocaleDateString('ar-JO', { day: 'numeric', month: 'long', year: 'numeric', numberingSystem: 'latn' })
     }));
     res.json(formatted);
   } catch (error) {
-    logger.error('Error fetching announcements:', error);
     res.status(500).json({ error: 'تعذر جلب الإعلانات', details: error.message });
   }
 });
@@ -240,46 +237,44 @@ app.get('/api/admin/pending-receipts', verifyToken, isAdmin, async (req, res) =>
   }
 });
 
+// الميزة المطلوبة: الحساب الديناميكي بناءً على المبلغ المدفوع
 app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res) => {
   try {
     const receiptId = req.params.id;
+    const { amount } = req.body; 
+    
+    // المبلغ الافتراضي 2 إذا لم يقم المدير بإدخاله
+    const paidAmount = parseFloat(amount) || 2.00;
+    
+    // الديناميكية: كل 2 دينار = 1 شهر
+    const monthsToAdvance = Math.floor(paidAmount / 2.00); 
+
     const receiptRes = await query(`SELECT member_id, for_month, for_year FROM pending_receipts WHERE id = $1`, [receiptId]);
     if (receiptRes.rows.length === 0) return res.status(404).json({error: 'الإيصال غير موجود'});
     
     const { member_id: memberId, for_month, for_year } = receiptRes.rows[0];
-    const MONTHLY_FEE = 2.00;
     
-    let subYear = for_year;
-    let subMonth = for_month;
-    let updateLastPaidQuery = `last_paid_date = COALESCE(last_paid_date, CURRENT_DATE) + interval '1 month'`;
-
-    if (!subMonth || !subYear) {
-      const memberRes = await query(`SELECT COALESCE(last_paid_date, CURRENT_DATE) as last_paid_date FROM members WHERE id = $1`, [memberId]);
-      const currentLastPaidDate = new Date(memberRes.rows[0].last_paid_date);
-      currentLastPaidDate.setDate(1);
-      currentLastPaidDate.setMonth(currentLastPaidDate.getMonth() + 1);
-      
-      subYear = currentLastPaidDate.getFullYear();
-      subMonth = currentLastPaidDate.getMonth() + 1; 
-    } else {
-      updateLastPaidQuery = `last_paid_date = GREATEST(COALESCE(last_paid_date, CURRENT_DATE), '${subYear}-${subMonth}-01'::date)`;
-    }
-
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
     
+    // تحديث الدين: إنقاص المبلغ المدفوع من إجمالي الدين
+    // تحديث تاريخ الدفع: إضافة الأشهر المحسوبة (monthsToAdvance) إلى آخر تاريخ دفع مسجل
     await query(`
       UPDATE members
       SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0),
-          ${updateLastPaidQuery}
-      WHERE id = $2
-    `, [MONTHLY_FEE, memberId]);
+          last_paid_date = COALESCE(last_paid_date, CURRENT_DATE) + interval '1 month' * $2
+      WHERE id = $3
+    `, [paidAmount, monthsToAdvance, memberId]);
+
+    // تسجيل الدفعة في سجل المدفوعات التفصيلي
+    const subYear = for_year || new Date().getFullYear();
+    const subMonth = for_month || (new Date().getMonth() + 1);
 
     await query(`
       INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
       VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)
-    `, [memberId, subYear, subMonth, MONTHLY_FEE]);
+    `, [memberId, subYear, subMonth, paidAmount]);
 
-    res.json({ message: 'تم الاعتماد' });
+    res.json({ message: 'تم الاعتماد بنجاح', advancedMonths: monthsToAdvance });
   } catch (error) {
     res.status(500).json({ error: 'تعذر الاعتماد' });
   }
@@ -347,21 +342,16 @@ app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res
   }
 });
 
-// ── مسار نشر الإعلان مع حماية للـ UUID ──
 app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   try {
     const { title, body, type, member_id } = req.body;
-    
-    // ضمان إرسال النص الحقيقي للـ UUID وإلا null
     const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
-
     await query(
       `INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, 
       [title, body, type, targetMemberId]
     );
     res.json({ message: 'تم نشر الإعلان' });
   } catch (error) {
-    logger.error('Error posting announcement:', error);
     res.status(500).json({ error: 'تعذر النشر', details: error.message });
   }
 });

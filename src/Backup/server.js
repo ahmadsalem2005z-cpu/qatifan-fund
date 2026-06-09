@@ -30,7 +30,7 @@ app.use(cors({
 
 app.use(express.json());
 
-// ── Auth & Registration Routes ──
+// ── Auth Routes ──
 app.post('/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -65,7 +65,6 @@ app.post('/auth/request-otp', async (req, res) => {
       ON CONFLICT (phone_number) DO UPDATE SET otp_code = $2, expires_at = $3
     `, [phone_number, otp, expiresAt]);
 
-    console.log(`OTP for ${phone_number} is ${otp}`);
     res.json({ message: "تم إرسال رمز التحقق بنجاح" });
   } catch (err) {
     res.status(500).json({ error: "حدث خطأ أثناء طلب رمز التحقق" });
@@ -158,11 +157,14 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
 
 app.get('/api/member/account', verifyToken, async (req, res) => {
   try {
+    // التوافقية مع جميع أشكال Token Payload
+    const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId) || null;
+    
     const result = await query(`
       SELECT m.*, json_agg(s ORDER BY s.subscription_year, s.subscription_month) as subscriptions
       FROM members m LEFT JOIN subscriptions s ON s.member_id = m.id
       WHERE m.id = $1 GROUP BY m.id
-    `, [req.user.id]);
+    `, [memberId]);
     res.json(result.rows[0]);
   } catch (error) {
     res.status(500).json({ error: 'تعذر جلب بيانات الحساب' });
@@ -173,18 +175,21 @@ app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (re
   try {
     if (!req.file) return res.status(400).json({ error: 'لم يتم العثور على صورة' });
     const receiptUrl = req.file.path;
-    const memberId = req.user.id;
-    await query(`INSERT INTO pending_receipts (member_id, receipt_url) VALUES ($1, $2)`, [memberId, receiptUrl]);
+    const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId);
+    const month = req.body.month || null;
+    const year = req.body.year || null;
+
+    await query(`INSERT INTO pending_receipts (member_id, receipt_url, for_month, for_year, status) VALUES ($1, $2, $3, $4, 'pending')`, [memberId, receiptUrl, month, year]);
     res.status(200).json({ message: 'تم الرفع بنجاح', url: receiptUrl });
   } catch (err) {
-    res.status(500).json({ error: 'حدث خطأ داخلي' });
+    res.status(500).json({ error: 'حدث خطأ داخلي أثناء الرفع' });
   }
 });
 
 app.post('/api/requests', verifyToken, async (req, res) => {
   try {
     const { type, amount, reason, timing, repay } = req.body;
-    const memberId = req.user.id;
+    const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId);
     await query(`
       INSERT INTO requests (member_id, type, amount, reason, timing, repayment_plan)
       VALUES ($1, $2, $3, $4, $5, $6)
@@ -195,16 +200,27 @@ app.post('/api/requests', verifyToken, async (req, res) => {
   }
 });
 
-app.get('/api/announcements', async (req, res) => {
+// ── مسار الإعلانات המחمي والمخصص ──
+app.get('/api/announcements', verifyToken, async (req, res) => {
   try {
-    const result = await query(`SELECT id, title, body, type, created_at FROM announcements ORDER BY created_at DESC`);
+    // استخراج رقم العضو بشكل قاطع مهما كانت بنية التوكن
+    const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId) || null;
+    
+    const result = await query(`
+      SELECT id, title, body, type, created_at 
+      FROM announcements 
+      WHERE member_id IS NULL OR member_id = $1
+      ORDER BY created_at DESC
+    `, [memberId]);
+    
     const formatted = result.rows.map(a => ({
       id: a.id, title: a.title, body: a.body, type: a.type,
       date: new Date(a.created_at).toLocaleDateString('ar-JO', { day: 'numeric', month: 'long', year: 'numeric', numberingSystem: 'latn' })
     }));
     res.json(formatted);
   } catch (error) {
-    res.status(500).json({ error: 'تعذر جلب الإعلانات' });
+    logger.error('Error fetching announcements:', error);
+    res.status(500).json({ error: 'تعذر جلب الإعلانات', details: error.message });
   }
 });
 
@@ -212,7 +228,7 @@ app.get('/api/announcements', async (req, res) => {
 app.get('/api/admin/pending-receipts', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
-      SELECT pr.id, pr.receipt_url AS image_url, pr.created_at AS date,
+      SELECT pr.id, pr.receipt_url AS image_url, pr.created_at AS date, pr.for_month, pr.for_year,
              m.full_name, m.monthly_subscription_amount AS amount
       FROM pending_receipts pr
       JOIN members m ON pr.member_id = m.id
@@ -227,37 +243,37 @@ app.get('/api/admin/pending-receipts', verifyToken, isAdmin, async (req, res) =>
 app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res) => {
   try {
     const receiptId = req.params.id;
-    const receiptRes = await query(`SELECT member_id FROM pending_receipts WHERE id = $1`, [receiptId]);
+    const receiptRes = await query(`SELECT member_id, for_month, for_year FROM pending_receipts WHERE id = $1`, [receiptId]);
     if (receiptRes.rows.length === 0) return res.status(404).json({error: 'الإيصال غير موجود'});
     
-    const memberId = receiptRes.rows[0].member_id;
+    const { member_id: memberId, for_month, for_year } = receiptRes.rows[0];
     const MONTHLY_FEE = 2.00;
-    const monthsToAdvance = 1;
-
-    // استخراج تاريخ آخر دفعة للعضو لحساب الشهر التالي بشكل ديناميكي
-    const memberRes = await query(`SELECT COALESCE(last_paid_date, CURRENT_DATE) as last_paid_date FROM members WHERE id = $1`, [memberId]);
-    const currentLastPaidDate = new Date(memberRes.rows[0].last_paid_date);
-
-    // ضبط اليوم على 1 لتجنب تخطي الأشهر القصيرة عند الإضافة
-    currentLastPaidDate.setDate(1);
-
-    // إضافة شهر واحد للحصول على تاريخ التغطية الجديد
-    const targetDate = new Date(currentLastPaidDate);
-    targetDate.setMonth(targetDate.getMonth() + 1);
     
-    const subYear = targetDate.getFullYear();
-    const subMonth = targetDate.getMonth() + 1; // getMonth يبدأ من 0 لذلك نضيف 1
+    let subYear = for_year;
+    let subMonth = for_month;
+    let updateLastPaidQuery = `last_paid_date = COALESCE(last_paid_date, CURRENT_DATE) + interval '1 month'`;
+
+    if (!subMonth || !subYear) {
+      const memberRes = await query(`SELECT COALESCE(last_paid_date, CURRENT_DATE) as last_paid_date FROM members WHERE id = $1`, [memberId]);
+      const currentLastPaidDate = new Date(memberRes.rows[0].last_paid_date);
+      currentLastPaidDate.setDate(1);
+      currentLastPaidDate.setMonth(currentLastPaidDate.getMonth() + 1);
+      
+      subYear = currentLastPaidDate.getFullYear();
+      subMonth = currentLastPaidDate.getMonth() + 1; 
+    } else {
+      updateLastPaidQuery = `last_paid_date = GREATEST(COALESCE(last_paid_date, CURRENT_DATE), '${subYear}-${subMonth}-01'::date)`;
+    }
 
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
     
     await query(`
       UPDATE members
       SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0),
-          last_paid_date = COALESCE(last_paid_date, CURRENT_DATE) + interval '1 month' * $2
-      WHERE id = $3
-    `, [MONTHLY_FEE, monthsToAdvance, memberId]);
+          ${updateLastPaidQuery}
+      WHERE id = $2
+    `, [MONTHLY_FEE, memberId]);
 
-    // إدخال الحركة التفصيلية بناءً على الشهر والسنة المستخرجين
     await query(`
       INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
       VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)
@@ -287,7 +303,6 @@ app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
     );
     res.json({ message: 'تم تسجيل المصروف بنجاح' });
   } catch (error) {
-    logger.error('Error adding expense:', error);
     res.status(500).json({ error: 'تعذر تسجيل المصروف' });
   }
 });
@@ -332,13 +347,31 @@ app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res
   }
 });
 
+// ── مسار نشر الإعلان مع حماية للـ UUID ──
 app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   try {
-    const { title, body, type } = req.body;
-    await query(`INSERT INTO announcements (title, body, type) VALUES ($1, $2, $3)`, [title, body, type]);
+    const { title, body, type, member_id } = req.body;
+    
+    // ضمان إرسال النص الحقيقي للـ UUID وإلا null
+    const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
+
+    await query(
+      `INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, 
+      [title, body, type, targetMemberId]
+    );
     res.json({ message: 'تم نشر الإعلان' });
   } catch (error) {
-    res.status(500).json({ error: 'تعذر النشر' });
+    logger.error('Error posting announcement:', error);
+    res.status(500).json({ error: 'تعذر النشر', details: error.message });
+  }
+});
+
+app.get('/api/admin/members/list', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const result = await query(`SELECT id, full_name FROM members ORDER BY full_name`);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر جلب الأعضاء' });
   }
 });
 
@@ -362,14 +395,25 @@ app.get('/api/fix-passwords', async (req, res) => {
   try {
     const hash = await bcrypt.hash('123456', 10);
     await query(`UPDATE members SET password_hash = $1`, [hash]);
-    res.json({ message: "تمت التهيئة" });
+    res.json({ message: "تمت التهيئة وتشفير جميع كلمات المرور بنجاح" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+const initializeDB = async () => {
+  try {
+    await query(`ALTER TABLE pending_receipts ADD COLUMN IF NOT EXISTS for_month INT, ADD COLUMN IF NOT EXISTS for_year INT`);
+    await query(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS member_id UUID`);
+    logger.info("Database schema validated successfully.");
+  } catch (e) {
+    logger.error("DB Init Error:", e);
+  }
+};
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
+  await initializeDB();
   logger.info(`Server running on port ${PORT}`);
   if(typeof scheduleMonthlyCron === 'function') scheduleMonthlyCron();
 });

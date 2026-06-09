@@ -342,12 +342,10 @@ app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res
   }
 });
 
-// التعامل السليم مع UUID بدلاً من الأرقام
 app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   try {
     const { title, body, type, member_id } = req.body;
     
-    // إذا كان member_id متاحاً وليس فارغاً يتم استخدامه كـ UUID، وإلا يكون null
     const targetMemberId = (member_id && member_id.trim() !== "") ? member_id : null;
 
     await query(
@@ -383,6 +381,17 @@ app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => 
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: 'تعذر جلب التقرير' });
+  }
+});
+
+// ── المسار المفقود الذي تم إرجاعه هنا ──
+app.get('/api/fix-passwords', async (req, res) => {
+  try {
+    const hash = await bcrypt.hash('123456', 10);
+    await query(`UPDATE members SET password_hash = $1`, [hash]);
+    res.json({ message: "تمت التهيئة وتشفير جميع كلمات المرور بنجاح" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

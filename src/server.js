@@ -30,7 +30,7 @@ app.use(cors({
 
 app.use(express.json());
 
-// ── Auth & Registration Routes ──
+// ── Auth Routes ──
 app.post('/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -65,7 +65,6 @@ app.post('/auth/request-otp', async (req, res) => {
       ON CONFLICT (phone_number) DO UPDATE SET otp_code = $2, expires_at = $3
     `, [phone_number, otp, expiresAt]);
 
-    console.log(`OTP for ${phone_number} is ${otp}`);
     res.json({ message: "تم إرسال رمز التحقق بنجاح" });
   } catch (err) {
     res.status(500).json({ error: "حدث خطأ أثناء طلب رمز التحقق" });
@@ -158,11 +157,14 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
 
 app.get('/api/member/account', verifyToken, async (req, res) => {
   try {
+    // التوافقية مع جميع أشكال Token Payload
+    const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId) || null;
+    
     const result = await query(`
       SELECT m.*, json_agg(s ORDER BY s.subscription_year, s.subscription_month) as subscriptions
       FROM members m LEFT JOIN subscriptions s ON s.member_id = m.id
       WHERE m.id = $1 GROUP BY m.id
-    `, [req.user.id]);
+    `, [memberId]);
     res.json(result.rows[0]);
   } catch (error) {
     res.status(500).json({ error: 'تعذر جلب بيانات الحساب' });
@@ -173,7 +175,7 @@ app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (re
   try {
     if (!req.file) return res.status(400).json({ error: 'لم يتم العثور على صورة' });
     const receiptUrl = req.file.path;
-    const memberId = req.user.id;
+    const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId);
     const month = req.body.month || null;
     const year = req.body.year || null;
 
@@ -187,7 +189,7 @@ app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (re
 app.post('/api/requests', verifyToken, async (req, res) => {
   try {
     const { type, amount, reason, timing, repay } = req.body;
-    const memberId = req.user.id;
+    const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId);
     await query(`
       INSERT INTO requests (member_id, type, amount, reason, timing, repayment_plan)
       VALUES ($1, $2, $3, $4, $5, $6)
@@ -198,15 +200,19 @@ app.post('/api/requests', verifyToken, async (req, res) => {
   }
 });
 
+// ── مسار الإعلانات המחمي والمخصص ──
 app.get('/api/announcements', verifyToken, async (req, res) => {
   try {
-    const memberId = req.user.id;
+    // استخراج رقم العضو بشكل قاطع مهما كانت بنية التوكن
+    const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId) || null;
+    
     const result = await query(`
       SELECT id, title, body, type, created_at 
       FROM announcements 
       WHERE member_id IS NULL OR member_id = $1
       ORDER BY created_at DESC
     `, [memberId]);
+    
     const formatted = result.rows.map(a => ({
       id: a.id, title: a.title, body: a.body, type: a.type,
       date: new Date(a.created_at).toLocaleDateString('ar-JO', { day: 'numeric', month: 'long', year: 'numeric', numberingSystem: 'latn' })
@@ -297,7 +303,6 @@ app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
     );
     res.json({ message: 'تم تسجيل المصروف بنجاح' });
   } catch (error) {
-    logger.error('Error adding expense:', error);
     res.status(500).json({ error: 'تعذر تسجيل المصروف' });
   }
 });
@@ -342,11 +347,13 @@ app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res
   }
 });
 
+// ── مسار نشر الإعلان مع حماية للـ UUID ──
 app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   try {
     const { title, body, type, member_id } = req.body;
     
-    const targetMemberId = (member_id && member_id.trim() !== "") ? member_id : null;
+    // ضمان إرسال النص الحقيقي للـ UUID وإلا null
+    const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
 
     await query(
       `INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, 
@@ -384,7 +391,6 @@ app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => 
   }
 });
 
-// ── المسار المفقود الذي تم إرجاعه هنا ──
 app.get('/api/fix-passwords', async (req, res) => {
   try {
     const hash = await bcrypt.hash('123456', 10);

@@ -198,9 +198,16 @@ app.post('/api/requests', verifyToken, async (req, res) => {
   }
 });
 
-app.get('/api/announcements', async (req, res) => {
+// تأمين مسار الإعلانات وجلب المخصصة للعضو فقط أو للجميع
+app.get('/api/announcements', verifyToken, async (req, res) => {
   try {
-    const result = await query(`SELECT id, title, body, type, created_at FROM announcements ORDER BY created_at DESC`);
+    const memberId = req.user.id;
+    const result = await query(`
+      SELECT id, title, body, type, created_at 
+      FROM announcements 
+      WHERE member_id IS NULL OR member_id = $1
+      ORDER BY created_at DESC
+    `, [memberId]);
     const formatted = result.rows.map(a => ({
       id: a.id, title: a.title, body: a.body, type: a.type,
       date: new Date(a.created_at).toLocaleDateString('ar-JO', { day: 'numeric', month: 'long', year: 'numeric', numberingSystem: 'latn' })
@@ -241,7 +248,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     let updateLastPaidQuery = `last_paid_date = COALESCE(last_paid_date, CURRENT_DATE) + interval '1 month'`;
 
     if (!subMonth || !subYear) {
-      // الحساب التلقائي (الشهر التالي)
       const memberRes = await query(`SELECT COALESCE(last_paid_date, CURRENT_DATE) as last_paid_date FROM members WHERE id = $1`, [memberId]);
       const currentLastPaidDate = new Date(memberRes.rows[0].last_paid_date);
       currentLastPaidDate.setDate(1);
@@ -250,7 +256,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
       subYear = currentLastPaidDate.getFullYear();
       subMonth = currentLastPaidDate.getMonth() + 1; 
     } else {
-      // الحساب اليدوي (تحديث آخر تاريخ سداد ليكون هذا الشهر إذا كان أحدث من القديم)
       updateLastPaidQuery = `last_paid_date = GREATEST(COALESCE(last_paid_date, CURRENT_DATE), '${subYear}-${subMonth}-01'::date)`;
     }
 
@@ -263,7 +268,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
       WHERE id = $2
     `, [MONTHLY_FEE, memberId]);
 
-    // تسجيل الاشتراك الفعلي
     await query(`
       INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
       VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)
@@ -338,13 +342,27 @@ app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res
   }
 });
 
+// تحديث مسار النشر ليقبل member_id
 app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   try {
-    const { title, body, type } = req.body;
-    await query(`INSERT INTO announcements (title, body, type) VALUES ($1, $2, $3)`, [title, body, type]);
+    const { title, body, type, member_id } = req.body;
+    await query(
+      `INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, 
+      [title, body, type, member_id || null]
+    );
     res.json({ message: 'تم نشر الإعلان' });
   } catch (error) {
     res.status(500).json({ error: 'تعذر النشر' });
+  }
+});
+
+// مسار جديد لجلب قائمة الأعضاء للمدير (لاستخدامها في التحديد)
+app.get('/api/admin/members/list', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const result = await query(`SELECT id, full_name FROM members ORDER BY full_name`);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر جلب الأعضاء' });
   }
 });
 
@@ -364,20 +382,10 @@ app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => 
   }
 });
 
-app.get('/api/fix-passwords', async (req, res) => {
-  try {
-    const hash = await bcrypt.hash('123456', 10);
-    await query(`UPDATE members SET password_hash = $1`, [hash]);
-    res.json({ message: "تمت التهيئة" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// تهيئة قاعدة البيانات والتأكد من وجود الأعمدة الجديدة
 const initializeDB = async () => {
   try {
     await query(`ALTER TABLE pending_receipts ADD COLUMN IF NOT EXISTS for_month INT, ADD COLUMN IF NOT EXISTS for_year INT`);
+    await query(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS member_id INT`);
     logger.info("Database schema validated successfully.");
   } catch (e) {
     logger.error("DB Init Error:", e);

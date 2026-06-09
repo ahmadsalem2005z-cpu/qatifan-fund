@@ -62,7 +62,7 @@ app.post('/auth/request-otp', async (req, res) => {
     await query(`
       INSERT INTO otp_verifications (phone_number, otp_code, expires_at)
       VALUES ($1, $2, $3)
-      ON CONFLICT (phone_number) DO UPDATE SET otp_code = $2, expires_at = $3
+      ON CONFLICT (phone_number) DO UPDATE SET SET otp_code = $2, expires_at = $3
     `, [phone_number, otp, expiresAt]);
 
     console.log(`OTP for ${phone_number} is ${otp}`);
@@ -198,7 +198,6 @@ app.post('/api/requests', verifyToken, async (req, res) => {
   }
 });
 
-// تأمين مسار الإعلانات وجلب المخصصة للعضو فقط أو للجميع
 app.get('/api/announcements', verifyToken, async (req, res) => {
   try {
     const memberId = req.user.id;
@@ -342,12 +341,16 @@ app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res
   }
 });
 
-// مسار نشر الإعلان المحدث مع معالجة الأخطاء
 app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   try {
     const { title, body, type, member_id } = req.body;
-    // تحويل الـ id إلى صيغة رقمية صحيحة في حال تم إرساله كنص
-    const targetMemberId = member_id ? parseInt(member_id) : null; 
+    
+    // حماية قوية لتفادي أخطاء NaN في قاعدة البيانات
+    let targetMemberId = null;
+    const parsedId = parseInt(member_id, 10);
+    if (!isNaN(parsedId)) {
+      targetMemberId = parsedId;
+    }
 
     await query(
       `INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, 
@@ -355,12 +358,11 @@ app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
     );
     res.json({ message: 'تم نشر الإعلان' });
   } catch (error) {
-    logger.error('Error posting announcement:', error); // سيتم طباعة الخطأ الدقيق في Railway
+    logger.error('Error posting announcement:', error);
     res.status(500).json({ error: 'تعذر النشر', details: error.message });
   }
 });
 
-// مسار لجلب قائمة الأعضاء للمدير (لاستخدامها في التحديد)
 app.get('/api/admin/members/list', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`SELECT id, full_name FROM members ORDER BY full_name`);

@@ -62,7 +62,7 @@ app.post('/auth/request-otp', async (req, res) => {
     await query(`
       INSERT INTO otp_verifications (phone_number, otp_code, expires_at)
       VALUES ($1, $2, $3)
-      ON CONFLICT (phone_number) DO UPDATE SET SET otp_code = $2, expires_at = $3
+      ON CONFLICT (phone_number) DO UPDATE SET otp_code = $2, expires_at = $3
     `, [phone_number, otp, expiresAt]);
 
     console.log(`OTP for ${phone_number} is ${otp}`);
@@ -213,7 +213,8 @@ app.get('/api/announcements', verifyToken, async (req, res) => {
     }));
     res.json(formatted);
   } catch (error) {
-    res.status(500).json({ error: 'تعذر جلب الإعلانات' });
+    logger.error('Error fetching announcements:', error);
+    res.status(500).json({ error: 'تعذر جلب الإعلانات', details: error.message });
   }
 });
 
@@ -341,16 +342,13 @@ app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res
   }
 });
 
+// التعامل السليم مع UUID بدلاً من الأرقام
 app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   try {
     const { title, body, type, member_id } = req.body;
     
-    // حماية قوية لتفادي أخطاء NaN في قاعدة البيانات
-    let targetMemberId = null;
-    const parsedId = parseInt(member_id, 10);
-    if (!isNaN(parsedId)) {
-      targetMemberId = parsedId;
-    }
+    // إذا كان member_id متاحاً وليس فارغاً يتم استخدامه كـ UUID، وإلا يكون null
+    const targetMemberId = (member_id && member_id.trim() !== "") ? member_id : null;
 
     await query(
       `INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, 
@@ -391,7 +389,7 @@ app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => 
 const initializeDB = async () => {
   try {
     await query(`ALTER TABLE pending_receipts ADD COLUMN IF NOT EXISTS for_month INT, ADD COLUMN IF NOT EXISTS for_year INT`);
-    await query(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS member_id INT`);
+    await query(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS member_id UUID`);
     logger.info("Database schema validated successfully.");
   } catch (e) {
     logger.error("DB Init Error:", e);

@@ -342,21 +342,25 @@ app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res
   }
 });
 
-// تحديث مسار النشر ليقبل member_id
+// مسار نشر الإعلان المحدث مع معالجة الأخطاء
 app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   try {
     const { title, body, type, member_id } = req.body;
+    // تحويل الـ id إلى صيغة رقمية صحيحة في حال تم إرساله كنص
+    const targetMemberId = member_id ? parseInt(member_id) : null; 
+
     await query(
       `INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, 
-      [title, body, type, member_id || null]
+      [title, body, type, targetMemberId]
     );
     res.json({ message: 'تم نشر الإعلان' });
   } catch (error) {
-    res.status(500).json({ error: 'تعذر النشر' });
+    logger.error('Error posting announcement:', error); // سيتم طباعة الخطأ الدقيق في Railway
+    res.status(500).json({ error: 'تعذر النشر', details: error.message });
   }
 });
 
-// مسار جديد لجلب قائمة الأعضاء للمدير (لاستخدامها في التحديد)
+// مسار لجلب قائمة الأعضاء للمدير (لاستخدامها في التحديد)
 app.get('/api/admin/members/list', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`SELECT id, full_name FROM members ORDER BY full_name`);

@@ -30,12 +30,12 @@ app.use(cors({
 
 app.use(express.json());
 
-// ── مسار إبقاء السيرفر مستيقظاً (جديد) ──
+// ── Public Routes ──
 app.get('/api/health', (req, res) => {
   res.status(200).json({ message: 'السيرفر مستيقظ ويعمل بنجاح!' });
 });
 
-// ── Auth & Registration Routes ──
+// ── Auth Routes ──
 app.post('/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -60,16 +60,13 @@ app.post('/auth/request-otp', async (req, res) => {
   try {
     const { phone_number } = req.body;
     if (!phone_number) return res.status(400).json({ error: "رقم الهاتف مطلوب" });
-
     const otp = Math.floor(1000 + Math.random() * 9000).toString(); 
     const expiresAt = new Date(Date.now() + 10 * 60000);
-
     await query(`
       INSERT INTO otp_verifications (phone_number, otp_code, expires_at)
       VALUES ($1, $2, $3)
       ON CONFLICT (phone_number) DO UPDATE SET otp_code = $2, expires_at = $3
     `, [phone_number, otp, expiresAt]);
-
     res.json({ message: "تم إرسال رمز التحقق بنجاح" });
   } catch (err) {
     res.status(500).json({ error: "حدث خطأ أثناء طلب رمز التحقق" });
@@ -87,7 +84,6 @@ app.post('/auth/register', async (req, res) => {
       INSERT INTO members (full_name, phone_number, email, password_hash, dob, marital_status, role, username, family_branch)
       VALUES ($1, $2, $3, $4, $5, $6, 'member', $2, 'غير محدد')
     `, [full_name, phone_number, email, hashedPassword, dob, marital_status]);
-
     await query(`DELETE FROM otp_verifications WHERE phone_number = $1`, [phone_number]);
     res.json({ success: true, message: "تم إنشاء الحساب بنجاح" });
   } catch (err) {
@@ -253,40 +249,23 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     if (receiptRes.rows.length === 0) return res.status(404).json({error: 'الإيصال غير موجود'});
     
     const { member_id: memberId, for_month, for_year } = receiptRes.rows[0];
-
     const memberRes = await query(`SELECT last_paid_date FROM members WHERE id = $1`, [memberId]);
     const dbLastPaid = memberRes.rows[0].last_paid_date;
 
     let subYear, subMonth, finalLastPaidDate;
-
     if (for_year && for_month) {
       subYear = parseInt(for_year, 10);
       subMonth = parseInt(for_month, 10);
-      
       const baseDate = new Date(subYear, subMonth - 1, 1);
       const newCoveredDate = new Date(baseDate);
       newCoveredDate.setMonth(newCoveredDate.getMonth() + (monthsToAdvance - 1));
-
-      if (!dbLastPaid) {
-        finalLastPaidDate = newCoveredDate;
-      } else {
-        const currentLast = new Date(dbLastPaid);
-        finalLastPaidDate = newCoveredDate > currentLast ? newCoveredDate : currentLast;
-      }
+      finalLastPaidDate = (!dbLastPaid) ? newCoveredDate : (newCoveredDate > new Date(dbLastPaid) ? newCoveredDate : new Date(dbLastPaid));
     } else {
-      let baseDate;
-      if (!dbLastPaid) {
-        baseDate = new Date();
-        baseDate.setDate(1);
-      } else {
-        baseDate = new Date(dbLastPaid);
-        baseDate.setDate(1);
-        baseDate.setMonth(baseDate.getMonth() + 1); 
-      }
-
+      let baseDate = dbLastPaid ? new Date(dbLastPaid) : new Date();
+      if (dbLastPaid) baseDate.setMonth(baseDate.getMonth() + 1);
+      baseDate.setDate(1);
       subYear = baseDate.getFullYear();
       subMonth = baseDate.getMonth() + 1;
-
       const newCoveredDate = new Date(baseDate);
       newCoveredDate.setMonth(newCoveredDate.getMonth() + (monthsToAdvance - 1));
       finalLastPaidDate = newCoveredDate;
@@ -308,9 +287,12 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
       VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)
     `, [memberId, subYear, subMonth, paidAmount]);
 
+    // 💡 Audit Log: تسديد الدفعة
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
+      ['Admin', memberId, 'اعتماد إيصال', paidAmount, `تغطية ${monthsToAdvance} أشهر وتحديث التاريخ`]);
+
     res.json({ message: 'تم الاعتماد بنجاح', advancedMonths: monthsToAdvance });
   } catch (error) {
-    logger.error('Error approving receipt:', error);
     res.status(500).json({ error: 'تعذر الاعتماد' });
   }
 });
@@ -369,6 +351,10 @@ app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res
       );
       if (reqInfo.type === 'loan') {
         await query(`UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE id = $2`, [reqInfo.amount, reqInfo.member_id]);
+        
+        // 💡 Audit Log: إضافة سلفة للذمة
+        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
+          ['Admin', reqInfo.member_id, 'إضافة سلفة', reqInfo.amount, 'الموافقة على طلب سلفة من التطبيق']);
       }
     }
     res.json({ success: true, message: 'تم التحديث' });
@@ -407,17 +393,7 @@ app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => 
   }
 });
 
-app.get('/api/fix-passwords', async (req, res) => {
-  try {
-    const hash = await bcrypt.hash('123456', 10);
-    await query(`UPDATE members SET password_hash = $1`, [hash]);
-    res.json({ message: "تمت التهيئة وتشفير جميع كلمات المرور بنجاح" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── مسارات إدارة الأعضاء الشاملة (CRUD) ──
+// ── CRUD & Member Admin Routes ──
 app.get('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
@@ -456,12 +432,25 @@ app.post('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
 
 app.put('/api/admin/members/:id', verifyToken, isAdmin, async (req, res) => {
   try {
-    const { full_name, phone_number, family_branch, total_debt, last_paid_date } = req.body;
+    const { full_name, phone_number, family_branch, total_debt, last_paid_date, audit_reason } = req.body;
+    
+    // 💡 جلب الذمة القديمة للمقارنة وتوثيق السجل المالي
+    const oldData = await query(`SELECT total_debt FROM members WHERE id=$1`, [req.params.id]);
+    const oldDebt = parseFloat(oldData.rows[0]?.total_debt) || 0;
+    const newDebt = parseFloat(total_debt) || 0;
+    const diff = newDebt - oldDebt;
+
     await query(`
       UPDATE members
       SET full_name=$1, phone_number=$2, family_branch=$3, total_debt=$4, last_paid_date=$5
       WHERE id=$6
     `, [full_name, phone_number, family_branch, total_debt, last_paid_date || null, req.params.id]);
+
+    if (diff !== 0) {
+      await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
+        ['Admin', req.params.id, 'تعديل ذمة يدوي', diff, audit_reason || 'تعديل من لوحة الإدارة']);
+    }
+
     res.json({ message: 'تم تحديث بيانات العضو' });
   } catch (error) {
     res.status(500).json({ error: 'تعذر تحديث العضو' });
@@ -480,25 +469,53 @@ app.patch('/api/admin/members/:id/status', verifyToken, isAdmin, async (req, res
 
 app.post('/api/admin/members/bulk-dues', verifyToken, isAdmin, async (req, res) => {
   try {
-    const { amount, branch, status } = req.body;
+    const { amount, branch, status, audit_reason } = req.body;
     let q = `UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE 1=1`;
     const params = [amount];
     let idx = 2;
     
-    if (branch && branch !== 'all') { 
-      q += ` AND family_branch = $${idx++}`; 
-      params.push(branch); 
-    }
-    if (status && status !== 'all') { 
-      q += ` AND membership_status = $${idx++}`; 
-      params.push(status); 
+    if (branch && branch !== 'all') { q += ` AND family_branch = $${idx++}`; params.push(branch); }
+    if (status && status !== 'all') { q += ` AND membership_status = $${idx++}`; params.push(status); }
+    
+    // 💡 استخدام RETURNING id لمعرفة الأعضاء الذين تأثروا، وتسجيلهم بالتدقيق
+    q += ` RETURNING id`;
+    const result = await query(q, params);
+
+    if (result.rows.length > 0) {
+      const promises = result.rows.map(row => 
+        query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
+          ['Admin', row.id, 'تطبيق ذمة جماعية', amount, audit_reason || 'رسوم أو اشتراكات جماعية'])
+      );
+      await Promise.all(promises);
     }
 
-    const result = await query(q, params);
     res.json({ message: `تمت إضافة ${amount} د.أ على ${result.rowCount} عضو بنجاح` });
   } catch (error) {
     res.status(500).json({ error: 'تعذر تطبيق الذمم الجماعية' });
   }
+});
+
+// ── مسار جلب سجل التدقيق للإدارة ──
+app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT a.*, m.full_name 
+      FROM audit_logs a
+      LEFT JOIN members m ON a.member_id = m.id
+      ORDER BY a.created_at DESC LIMIT 200
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر جلب سجل التدقيق' });
+  }
+});
+
+app.get('/api/fix-passwords', async (req, res) => {
+  try {
+    const hash = await bcrypt.hash('123456', 10);
+    await query(`UPDATE members SET password_hash = $1`, [hash]);
+    res.json({ message: "تمت التهيئة" });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 const initializeDB = async () => {
@@ -506,7 +523,20 @@ const initializeDB = async () => {
     await query(`ALTER TABLE pending_receipts ADD COLUMN IF NOT EXISTS for_month INT, ADD COLUMN IF NOT EXISTS for_year INT`);
     await query(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS member_id UUID`);
     await query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS family_branch VARCHAR(100) DEFAULT 'غير محدد'`);
-    logger.info("Database schema validated successfully.");
+    
+    // 💡 إنشاء جدول التدقيق المالي
+    await query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id SERIAL PRIMARY KEY,
+        admin_id VARCHAR(50) DEFAULT 'Admin',
+        member_id UUID REFERENCES members(id) ON DELETE SET NULL,
+        action VARCHAR(100),
+        amount DECIMAL(10,2),
+        reason TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    logger.info("Database schema & Audit Logs validated successfully.");
   } catch (e) {
     logger.error("DB Init Error:", e);
   }

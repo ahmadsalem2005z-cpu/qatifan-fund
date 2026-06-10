@@ -287,7 +287,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
       VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)
     `, [memberId, subYear, subMonth, paidAmount]);
 
-    // 💡 Audit Log: تسديد الدفعة
     await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
       ['Admin', memberId, 'اعتماد إيصال', paidAmount, `تغطية ${monthsToAdvance} أشهر وتحديث التاريخ`]);
 
@@ -306,15 +305,25 @@ app.post('/api/admin/reject-receipt/:id', verifyToken, isAdmin, async (req, res)
   }
 });
 
+// ── إصلاح سحب المصروف ──
 app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
   try {
-    const { category, reason, amount } = req.body;
+    // تم تصحيح استخراج الـ label ليتطابق مع ما ترسله الواجهة
+    const { category, label, amount } = req.body;
+    const expenseLabel = label || req.body.reason || 'بدون وصف';
+
     await query(
       `INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`,
-      [category, reason, amount]
+      [category, expenseLabel, amount]
     );
+
+    // 💡 توثيق المصروف في سجل التدقيق المالي كقيمة سالبة (خروج نقد)
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
+      ['Admin', null, 'سحب مصروف', -Math.abs(amount), `تصنيف: ${category} - ${expenseLabel}`]);
+
     res.json({ message: 'تم تسجيل المصروف بنجاح' });
   } catch (error) {
+    logger.error('Error adding expense:', error);
     res.status(500).json({ error: 'تعذر تسجيل المصروف' });
   }
 });
@@ -332,6 +341,7 @@ app.get('/api/admin/requests', verifyToken, isAdmin, async (req, res) => {
   }
 });
 
+// ── توثيق الموافقات على الطلبات ──
 app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res) => {
   try {
     const { status } = req.body;
@@ -349,12 +359,16 @@ app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res
         `INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`,
         [reqInfo.type, expenseLabel, reqInfo.amount]
       );
+      
       if (reqInfo.type === 'loan') {
+        // السلفة تعتبر دين إضافي يوضع على العضو
         await query(`UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE id = $2`, [reqInfo.amount, reqInfo.member_id]);
-        
-        // 💡 Audit Log: إضافة سلفة للذمة
         await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
           ['Admin', reqInfo.member_id, 'إضافة سلفة', reqInfo.amount, 'الموافقة على طلب سلفة من التطبيق']);
+      } else {
+        // المساعدات والزواج والعزاء تُسجل كخروج نقد موجه لعضو محدد
+        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
+          ['Admin', reqInfo.member_id, 'صرف مساعدة', -Math.abs(reqInfo.amount), `الموافقة على طلب: ${reqInfo.type}`]);
       }
     }
     res.json({ success: true, message: 'تم التحديث' });
@@ -434,7 +448,6 @@ app.put('/api/admin/members/:id', verifyToken, isAdmin, async (req, res) => {
   try {
     const { full_name, phone_number, family_branch, total_debt, last_paid_date, audit_reason } = req.body;
     
-    // 💡 جلب الذمة القديمة للمقارنة وتوثيق السجل المالي
     const oldData = await query(`SELECT total_debt FROM members WHERE id=$1`, [req.params.id]);
     const oldDebt = parseFloat(oldData.rows[0]?.total_debt) || 0;
     const newDebt = parseFloat(total_debt) || 0;
@@ -477,7 +490,6 @@ app.post('/api/admin/members/bulk-dues', verifyToken, isAdmin, async (req, res) 
     if (branch && branch !== 'all') { q += ` AND family_branch = $${idx++}`; params.push(branch); }
     if (status && status !== 'all') { q += ` AND membership_status = $${idx++}`; params.push(status); }
     
-    // 💡 استخدام RETURNING id لمعرفة الأعضاء الذين تأثروا، وتسجيلهم بالتدقيق
     q += ` RETURNING id`;
     const result = await query(q, params);
 
@@ -495,11 +507,11 @@ app.post('/api/admin/members/bulk-dues', verifyToken, isAdmin, async (req, res) 
   }
 });
 
-// ── مسار جلب سجل التدقيق للإدارة ──
+// ── مسار التدقيق المحدث: معالجة اسم الصندوق العام ──
 app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
-      SELECT a.*, m.full_name 
+      SELECT a.*, COALESCE(m.full_name, 'الصندوق العام') as full_name 
       FROM audit_logs a
       LEFT JOIN members m ON a.member_id = m.id
       ORDER BY a.created_at DESC LIMIT 200
@@ -524,7 +536,6 @@ const initializeDB = async () => {
     await query(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS member_id UUID`);
     await query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS family_branch VARCHAR(100) DEFAULT 'غير محدد'`);
     
-    // 💡 إنشاء جدول التدقيق المالي
     await query(`
       CREATE TABLE IF NOT EXISTS audit_logs (
         id SERIAL PRIMARY KEY,

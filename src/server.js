@@ -249,15 +249,12 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     
     const { member_id: memberId, for_month, for_year } = receiptRes.rows[0];
 
-    // جلب تاريخ السداد الحالي من قاعدة البيانات
     const memberRes = await query(`SELECT last_paid_date FROM members WHERE id = $1`, [memberId]);
     const dbLastPaid = memberRes.rows[0].last_paid_date;
 
     let subYear, subMonth, finalLastPaidDate;
 
-    // حساب التاريخ الجديد بدقة متناهية بناءً على الاختيار اليدوي أو التلقائي
     if (for_year && for_month) {
-      // الاختيار اليدوي
       subYear = parseInt(for_year, 10);
       subMonth = parseInt(for_month, 10);
       
@@ -265,7 +262,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
       const newCoveredDate = new Date(baseDate);
       newCoveredDate.setMonth(newCoveredDate.getMonth() + (monthsToAdvance - 1));
 
-      // مقارنة ذكية: لا تُرجع التاريخ للخلف أبداً
       if (!dbLastPaid) {
         finalLastPaidDate = newCoveredDate;
       } else {
@@ -273,7 +269,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
         finalLastPaidDate = newCoveredDate > currentLast ? newCoveredDate : currentLast;
       }
     } else {
-      // الاختيار التلقائي
       let baseDate;
       if (!dbLastPaid) {
         baseDate = new Date();
@@ -281,7 +276,7 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
       } else {
         baseDate = new Date(dbLastPaid);
         baseDate.setDate(1);
-        baseDate.setMonth(baseDate.getMonth() + 1); // يبدأ من الشهر التالي
+        baseDate.setMonth(baseDate.getMonth() + 1); 
       }
 
       subYear = baseDate.getFullYear();
@@ -292,7 +287,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
       finalLastPaidDate = newCoveredDate;
     }
 
-    // تنسيق التاريخ بصيغة يقبلها Postgres (YYYY-MM-DD)
     const formattedLastPaidDate = `${finalLastPaidDate.getFullYear()}-${finalLastPaidDate.getMonth() + 1}-01`;
 
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
@@ -334,7 +328,6 @@ app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
     );
     res.json({ message: 'تم تسجيل المصروف بنجاح' });
   } catch (error) {
-    logger.error('Error adding expense:', error);
     res.status(500).json({ error: 'تعذر تسجيل المصروف' });
   }
 });
@@ -383,14 +376,12 @@ app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   try {
     const { title, body, type, member_id } = req.body;
     const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
-
     await query(
       `INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, 
       [title, body, type, targetMemberId]
     );
     res.json({ message: 'تم نشر الإعلان' });
   } catch (error) {
-    logger.error('Error posting announcement:', error);
     res.status(500).json({ error: 'تعذر النشر', details: error.message });
   }
 });
@@ -404,10 +395,11 @@ app.get('/api/admin/members/list', verifyToken, isAdmin, async (req, res) => {
   }
 });
 
+// ── إصلاح التقرير: إضافة حالة العضوية (membership_status) ──
 app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
-      SELECT m.full_name, m.phone_number, m.total_debt, m.last_paid_date,
+      SELECT m.full_name, m.phone_number, m.membership_status, m.total_debt, m.last_paid_date,
              COALESCE(SUM(s.amount), 0) as total_paid
       FROM members m
       LEFT JOIN subscriptions s ON m.id = s.member_id AND s.status = 'paid'

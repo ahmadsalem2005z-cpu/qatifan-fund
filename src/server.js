@@ -30,6 +30,11 @@ app.use(cors({
 
 app.use(express.json());
 
+// ── مسار إبقاء السيرفر مستيقظاً (جديد) ──
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ message: 'السيرفر مستيقظ ويعمل بنجاح!' });
+});
+
 // ── Auth & Registration Routes ──
 app.post('/auth/login', async (req, res) => {
   try {
@@ -221,17 +226,6 @@ app.get('/api/announcements', verifyToken, async (req, res) => {
 });
 
 // ── Admin Only Routes ──
-
-// ⬇️ هذا هو المسار الذي تمت إعادته لكي تعمل القائمة المنسدلة للإعلانات
-app.get('/api/admin/members/list', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const result = await query(`SELECT id, full_name FROM members ORDER BY full_name`);
-    res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: 'تعذر جلب قائمة الأعضاء' });
-  }
-});
-
 app.get('/api/admin/pending-receipts', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
@@ -437,6 +431,15 @@ app.get('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
   }
 });
 
+app.get('/api/admin/members/list', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const result = await query(`SELECT id, full_name FROM members ORDER BY full_name`);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر جلب قائمة الأعضاء' });
+  }
+});
+
 app.post('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
   try {
     const { full_name, phone_number, family_branch, total_debt, last_paid_date } = req.body;
@@ -498,7 +501,6 @@ app.post('/api/admin/members/bulk-dues', verifyToken, isAdmin, async (req, res) 
   }
 });
 
-// ── تهيئة قاعدة البيانات ──
 const initializeDB = async () => {
   try {
     await query(`ALTER TABLE pending_receipts ADD COLUMN IF NOT EXISTS for_month INT, ADD COLUMN IF NOT EXISTS for_year INT`);

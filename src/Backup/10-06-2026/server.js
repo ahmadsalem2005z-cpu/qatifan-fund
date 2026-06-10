@@ -79,8 +79,8 @@ app.post('/auth/register', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
     await query(`
-      INSERT INTO members (full_name, phone_number, email, password_hash, dob, marital_status, role, username, family_branch)
-      VALUES ($1, $2, $3, $4, $5, $6, 'member', $2, 'غير محدد')
+      INSERT INTO members (full_name, phone_number, email, password_hash, dob, marital_status, role, username)
+      VALUES ($1, $2, $3, $4, $5, $6, 'member', $2)
     `, [full_name, phone_number, email, hashedPassword, dob, marital_status]);
 
     await query(`DELETE FROM otp_verifications WHERE phone_number = $1`, [phone_number]);
@@ -386,6 +386,16 @@ app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   }
 });
 
+app.get('/api/admin/members/list', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const result = await query(`SELECT id, full_name FROM members ORDER BY full_name`);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر جلب الأعضاء' });
+  }
+});
+
+// ── إصلاح التقرير: إضافة حالة العضوية (membership_status) ──
 app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
@@ -412,88 +422,10 @@ app.get('/api/fix-passwords', async (req, res) => {
   }
 });
 
-// ── مسارات إدارة الأعضاء الجديدة (Directory & CRUD) ──
-
-app.get('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const result = await query(`
-      SELECT id, full_name, phone_number, membership_status, total_debt, last_paid_date, family_branch 
-      FROM members 
-      ORDER BY full_name
-    `);
-    res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: 'تعذر جلب الأعضاء' });
-  }
-});
-
-app.post('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const { full_name, phone_number, family_branch, total_debt, last_paid_date } = req.body;
-    const hash = await bcrypt.hash('123456', 10); // كلمة مرور افتراضية للعضو المضاف عبر الإدارة
-    await query(`
-      INSERT INTO members (full_name, phone_number, family_branch, total_debt, last_paid_date, password_hash, role, membership_status, username)
-      VALUES ($1, $2, $3, $4, $5, $6, 'member', 'active', $2)
-    `, [full_name, phone_number, family_branch || 'غير محدد', total_debt || 0, last_paid_date || null, hash]);
-    res.json({ message: 'تم إضافة العضو بنجاح' });
-  } catch (error) {
-    res.status(500).json({ error: 'تعذر إضافة العضو' });
-  }
-});
-
-app.put('/api/admin/members/:id', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const { full_name, phone_number, family_branch, total_debt, last_paid_date } = req.body;
-    await query(`
-      UPDATE members
-      SET full_name=$1, phone_number=$2, family_branch=$3, total_debt=$4, last_paid_date=$5
-      WHERE id=$6
-    `, [full_name, phone_number, family_branch, total_debt, last_paid_date || null, req.params.id]);
-    res.json({ message: 'تم تحديث بيانات العضو' });
-  } catch (error) {
-    res.status(500).json({ error: 'تعذر تحديث العضو' });
-  }
-});
-
-app.patch('/api/admin/members/:id/status', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const { status } = req.body; // 'active' or 'archived'
-    await query(`UPDATE members SET membership_status = $1 WHERE id = $2`, [status, req.params.id]);
-    res.json({ message: 'تم تغيير حالة العضو' });
-  } catch (error) {
-    res.status(500).json({ error: 'تعذر تغيير الحالة' });
-  }
-});
-
-app.post('/api/admin/members/bulk-dues', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const { amount, branch, status } = req.body;
-    let q = `UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE 1=1`;
-    const params = [amount];
-    let idx = 2;
-    
-    if (branch && branch !== 'all') { 
-      q += ` AND family_branch = $${idx++}`; 
-      params.push(branch); 
-    }
-    if (status && status !== 'all') { 
-      q += ` AND membership_status = $${idx++}`; 
-      params.push(status); 
-    }
-
-    const result = await query(q, params);
-    res.json({ message: `تمت إضافة ${amount} د.أ على ${result.rowCount} عضو بنجاح` });
-  } catch (error) {
-    res.status(500).json({ error: 'تعذر تطبيق الذمم الجماعية' });
-  }
-});
-
-// ── تهيئة قاعدة البيانات ──
 const initializeDB = async () => {
   try {
     await query(`ALTER TABLE pending_receipts ADD COLUMN IF NOT EXISTS for_month INT, ADD COLUMN IF NOT EXISTS for_year INT`);
     await query(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS member_id UUID`);
-    await query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS family_branch VARCHAR(100) DEFAULT 'غير محدد'`);
     logger.info("Database schema validated successfully.");
   } catch (e) {
     logger.error("DB Init Error:", e);

@@ -221,6 +221,17 @@ app.get('/api/announcements', verifyToken, async (req, res) => {
 });
 
 // ── Admin Only Routes ──
+
+// ⬇️ هذا هو المسار الذي تمت إعادته لكي تعمل القائمة المنسدلة للإعلانات
+app.get('/api/admin/members/list', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const result = await query(`SELECT id, full_name FROM members ORDER BY full_name`);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر جلب قائمة الأعضاء' });
+  }
+});
+
 app.get('/api/admin/pending-receipts', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
@@ -412,8 +423,7 @@ app.get('/api/fix-passwords', async (req, res) => {
   }
 });
 
-// ── مسارات إدارة الأعضاء الجديدة (Directory & CRUD) ──
-
+// ── مسارات إدارة الأعضاء الشاملة (CRUD) ──
 app.get('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
@@ -430,7 +440,7 @@ app.get('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
 app.post('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
   try {
     const { full_name, phone_number, family_branch, total_debt, last_paid_date } = req.body;
-    const hash = await bcrypt.hash('123456', 10); // كلمة مرور افتراضية للعضو المضاف عبر الإدارة
+    const hash = await bcrypt.hash('123456', 10);
     await query(`
       INSERT INTO members (full_name, phone_number, family_branch, total_debt, last_paid_date, password_hash, role, membership_status, username)
       VALUES ($1, $2, $3, $4, $5, $6, 'member', 'active', $2)
@@ -457,7 +467,7 @@ app.put('/api/admin/members/:id', verifyToken, isAdmin, async (req, res) => {
 
 app.patch('/api/admin/members/:id/status', verifyToken, isAdmin, async (req, res) => {
   try {
-    const { status } = req.body; // 'active' or 'archived'
+    const { status } = req.body;
     await query(`UPDATE members SET membership_status = $1 WHERE id = $2`, [status, req.params.id]);
     res.json({ message: 'تم تغيير حالة العضو' });
   } catch (error) {

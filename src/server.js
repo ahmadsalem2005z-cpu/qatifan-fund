@@ -30,7 +30,7 @@ app.use(cors({
 
 app.use(express.json());
 
-// ── Auth Routes ──
+// ── Auth & Registration Routes ──
 app.post('/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -133,7 +133,6 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
     const expensesSumResult = await query(`SELECT SUM(amount) as total FROM expenses`);
     const totalExpenses = parseFloat(expensesSumResult.rows[0].total) || 0;
 
-    // الميزة الجديدة: جمع كل الديون المستحقة على الأعضاء
     const totalDebtResult = await query(`SELECT SUM(total_debt) as total_unpaid_debt FROM members WHERE membership_status = 'active'`);
     const totalUnpaidDebt = parseFloat(totalDebtResult.rows[0].total_unpaid_debt) || 0;
 
@@ -237,37 +236,73 @@ app.get('/api/admin/pending-receipts', verifyToken, isAdmin, async (req, res) =>
   }
 });
 
-// الميزة المطلوبة: الحساب الديناميكي بناءً على المبلغ المدفوع
 app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res) => {
   try {
     const receiptId = req.params.id;
     const { amount } = req.body; 
     
-    // المبلغ الافتراضي 2 إذا لم يقم المدير بإدخاله
     const paidAmount = parseFloat(amount) || 2.00;
-    
-    // الديناميكية: كل 2 دينار = 1 شهر
     const monthsToAdvance = Math.floor(paidAmount / 2.00); 
 
     const receiptRes = await query(`SELECT member_id, for_month, for_year FROM pending_receipts WHERE id = $1`, [receiptId]);
     if (receiptRes.rows.length === 0) return res.status(404).json({error: 'الإيصال غير موجود'});
     
     const { member_id: memberId, for_month, for_year } = receiptRes.rows[0];
-    
+
+    // جلب تاريخ السداد الحالي من قاعدة البيانات
+    const memberRes = await query(`SELECT last_paid_date FROM members WHERE id = $1`, [memberId]);
+    const dbLastPaid = memberRes.rows[0].last_paid_date;
+
+    let subYear, subMonth, finalLastPaidDate;
+
+    // حساب التاريخ الجديد بدقة متناهية بناءً على الاختيار اليدوي أو التلقائي
+    if (for_year && for_month) {
+      // الاختيار اليدوي
+      subYear = parseInt(for_year, 10);
+      subMonth = parseInt(for_month, 10);
+      
+      const baseDate = new Date(subYear, subMonth - 1, 1);
+      const newCoveredDate = new Date(baseDate);
+      newCoveredDate.setMonth(newCoveredDate.getMonth() + (monthsToAdvance - 1));
+
+      // مقارنة ذكية: لا تُرجع التاريخ للخلف أبداً
+      if (!dbLastPaid) {
+        finalLastPaidDate = newCoveredDate;
+      } else {
+        const currentLast = new Date(dbLastPaid);
+        finalLastPaidDate = newCoveredDate > currentLast ? newCoveredDate : currentLast;
+      }
+    } else {
+      // الاختيار التلقائي
+      let baseDate;
+      if (!dbLastPaid) {
+        baseDate = new Date();
+        baseDate.setDate(1);
+      } else {
+        baseDate = new Date(dbLastPaid);
+        baseDate.setDate(1);
+        baseDate.setMonth(baseDate.getMonth() + 1); // يبدأ من الشهر التالي
+      }
+
+      subYear = baseDate.getFullYear();
+      subMonth = baseDate.getMonth() + 1;
+
+      const newCoveredDate = new Date(baseDate);
+      newCoveredDate.setMonth(newCoveredDate.getMonth() + (monthsToAdvance - 1));
+      finalLastPaidDate = newCoveredDate;
+    }
+
+    // تنسيق التاريخ بصيغة يقبلها Postgres (YYYY-MM-DD)
+    const formattedLastPaidDate = `${finalLastPaidDate.getFullYear()}-${finalLastPaidDate.getMonth() + 1}-01`;
+
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
     
-    // تحديث الدين: إنقاص المبلغ المدفوع من إجمالي الدين
-    // تحديث تاريخ الدفع: إضافة الأشهر المحسوبة (monthsToAdvance) إلى آخر تاريخ دفع مسجل
     await query(`
       UPDATE members
       SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0),
-          last_paid_date = COALESCE(last_paid_date, CURRENT_DATE) + interval '1 month' * $2
+          last_paid_date = $2
       WHERE id = $3
-    `, [paidAmount, monthsToAdvance, memberId]);
-
-    // تسجيل الدفعة في سجل المدفوعات التفصيلي
-    const subYear = for_year || new Date().getFullYear();
-    const subMonth = for_month || (new Date().getMonth() + 1);
+    `, [paidAmount, formattedLastPaidDate, memberId]);
 
     await query(`
       INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
@@ -276,6 +311,7 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
 
     res.json({ message: 'تم الاعتماد بنجاح', advancedMonths: monthsToAdvance });
   } catch (error) {
+    logger.error('Error approving receipt:', error);
     res.status(500).json({ error: 'تعذر الاعتماد' });
   }
 });
@@ -298,6 +334,7 @@ app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
     );
     res.json({ message: 'تم تسجيل المصروف بنجاح' });
   } catch (error) {
+    logger.error('Error adding expense:', error);
     res.status(500).json({ error: 'تعذر تسجيل المصروف' });
   }
 });
@@ -346,12 +383,14 @@ app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   try {
     const { title, body, type, member_id } = req.body;
     const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
+
     await query(
       `INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, 
       [title, body, type, targetMemberId]
     );
     res.json({ message: 'تم نشر الإعلان' });
   } catch (error) {
+    logger.error('Error posting announcement:', error);
     res.status(500).json({ error: 'تعذر النشر', details: error.message });
   }
 });

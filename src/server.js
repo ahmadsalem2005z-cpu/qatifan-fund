@@ -173,6 +173,34 @@ app.get('/api/member/account', verifyToken, async (req, res) => {
   }
 });
 
+// ── مسار كشف الحساب الذكي للعضو (جديد) ──
+app.get('/api/member/statement', verifyToken, async (req, res) => {
+  try {
+    const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId) || null;
+    const { startDate, endDate } = req.query;
+
+    let queryStr = `SELECT * FROM subscriptions WHERE member_id = $1 AND status = 'paid'`;
+    const params = [memberId];
+    let paramIdx = 2;
+
+    if (startDate) { queryStr += ` AND payment_date >= $${paramIdx++}`; params.push(startDate); }
+    if (endDate) { queryStr += ` AND payment_date <= $${paramIdx++}`; params.push(endDate + ' 23:59:59'); }
+    
+    queryStr += ` ORDER BY payment_date ASC`;
+
+    const subs = await query(queryStr, params);
+    const memberData = await query(`SELECT full_name, phone_number, total_debt, membership_status, family_branch FROM members WHERE id = $1`, [memberId]);
+
+    res.json({
+      member: memberData.rows[0],
+      payments: subs.rows,
+      total_paid_in_period: subs.rows.reduce((sum, s) => sum + parseFloat(s.amount), 0)
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر إصدار كشف الحساب' });
+  }
+});
+
 app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'لم يتم العثور على صورة' });
@@ -241,7 +269,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
   try {
     const receiptId = req.params.id;
     const { amount } = req.body; 
-    
     const paidAmount = parseFloat(amount) || 2.00;
     const monthsToAdvance = Math.floor(paidAmount / 2.00); 
 
@@ -274,21 +301,9 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     const formattedLastPaidDate = `${finalLastPaidDate.getFullYear()}-${finalLastPaidDate.getMonth() + 1}-01`;
 
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
-    
-    await query(`
-      UPDATE members
-      SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0),
-          last_paid_date = $2
-      WHERE id = $3
-    `, [paidAmount, formattedLastPaidDate, memberId]);
-
-    await query(`
-      INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date)
-      VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)
-    `, [memberId, subYear, subMonth, paidAmount]);
-
-    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
-      ['Admin', memberId, 'اعتماد إيصال', paidAmount, `تغطية ${monthsToAdvance} أشهر وتحديث التاريخ`]);
+    await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0), last_paid_date = $2 WHERE id = $3`, [paidAmount, formattedLastPaidDate, memberId]);
+    await query(`INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date) VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)`, [memberId, subYear, subMonth, paidAmount]);
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', memberId, 'اعتماد إيصال', paidAmount, `تغطية ${monthsToAdvance} أشهر وتحديث التاريخ`]);
 
     res.json({ message: 'تم الاعتماد بنجاح', advancedMonths: monthsToAdvance });
   } catch (error) {
@@ -305,22 +320,12 @@ app.post('/api/admin/reject-receipt/:id', verifyToken, isAdmin, async (req, res)
   }
 });
 
-// ── إصلاح سحب المصروف ──
 app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
   try {
-    // تم تصحيح استخراج الـ label ليتطابق مع ما ترسله الواجهة
     const { category, label, amount } = req.body;
     const expenseLabel = label || req.body.reason || 'بدون وصف';
-
-    await query(
-      `INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`,
-      [category, expenseLabel, amount]
-    );
-
-    // 💡 توثيق المصروف في سجل التدقيق المالي كقيمة سالبة (خروج نقد)
-    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
-      ['Admin', null, 'سحب مصروف', -Math.abs(amount), `تصنيف: ${category} - ${expenseLabel}`]);
-
+    await query(`INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`, [category, expenseLabel, amount]);
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', null, 'سحب مصروف', -Math.abs(amount), `تصنيف: ${category} - ${expenseLabel}`]);
     res.json({ message: 'تم تسجيل المصروف بنجاح' });
   } catch (error) {
     logger.error('Error adding expense:', error);
@@ -341,7 +346,6 @@ app.get('/api/admin/requests', verifyToken, isAdmin, async (req, res) => {
   }
 });
 
-// ── توثيق الموافقات على الطلبات ──
 app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res) => {
   try {
     const { status } = req.body;
@@ -355,20 +359,13 @@ app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res
 
     if (status === 'approved' && reqInfo.status !== 'approved') {
       let expenseLabel = reqInfo.type === 'loan' ? 'صرف سلفة' : 'صرف مساعدة';
-      await query(
-        `INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`,
-        [reqInfo.type, expenseLabel, reqInfo.amount]
-      );
+      await query(`INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`, [reqInfo.type, expenseLabel, reqInfo.amount]);
       
       if (reqInfo.type === 'loan') {
-        // السلفة تعتبر دين إضافي يوضع على العضو
         await query(`UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE id = $2`, [reqInfo.amount, reqInfo.member_id]);
-        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
-          ['Admin', reqInfo.member_id, 'إضافة سلفة', reqInfo.amount, 'الموافقة على طلب سلفة من التطبيق']);
+        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', reqInfo.member_id, 'إضافة سلفة', reqInfo.amount, 'الموافقة على طلب سلفة من التطبيق']);
       } else {
-        // المساعدات والزواج والعزاء تُسجل كخروج نقد موجه لعضو محدد
-        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
-          ['Admin', reqInfo.member_id, 'صرف مساعدة', -Math.abs(reqInfo.amount), `الموافقة على طلب: ${reqInfo.type}`]);
+        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', reqInfo.member_id, 'صرف مساعدة', -Math.abs(reqInfo.amount), `الموافقة على طلب: ${reqInfo.type}`]);
       }
     }
     res.json({ success: true, message: 'تم التحديث' });
@@ -381,10 +378,7 @@ app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   try {
     const { title, body, type, member_id } = req.body;
     const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
-    await query(
-      `INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, 
-      [title, body, type, targetMemberId]
-    );
+    await query(`INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, [title, body, type, targetMemberId]);
     res.json({ message: 'تم نشر الإعلان' });
   } catch (error) {
     res.status(500).json({ error: 'تعذر النشر', details: error.message });
@@ -407,14 +401,33 @@ app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => 
   }
 });
 
-// ── CRUD & Member Admin Routes ──
+// ── مسار التقرير السنوي الشامل للمدير (جديد) ──
+app.get('/api/admin/reports/annual', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { year } = req.query;
+    const targetYear = year || new Date().getFullYear();
+
+    const income = await query(`SELECT COALESCE(SUM(amount), 0) as total FROM subscriptions WHERE status = 'paid' AND EXTRACT(YEAR FROM payment_date) = $1`, [targetYear]);
+    const expenses = await query(`SELECT COALESCE(SUM(amount), 0) as total, category FROM expenses WHERE EXTRACT(YEAR FROM expense_date) = $1 GROUP BY category`, [targetYear]);
+    const totalExp = expenses.rows.reduce((sum, row) => sum + parseFloat(row.total), 0);
+    const membersData = await query(`SELECT COUNT(*) as active_members, COALESCE(SUM(total_debt), 0) as total_debt FROM members WHERE membership_status = 'active'`);
+
+    res.json({
+      year: targetYear,
+      total_income: parseFloat(income.rows[0].total),
+      total_expenses: totalExp,
+      expenses_breakdown: expenses.rows,
+      active_members: parseInt(membersData.rows[0].active_members),
+      total_debt: parseFloat(membersData.rows[0].total_debt)
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر توليد التقرير السنوي' });
+  }
+});
+
 app.get('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
   try {
-    const result = await query(`
-      SELECT id, full_name, phone_number, membership_status, total_debt, last_paid_date, family_branch 
-      FROM members 
-      ORDER BY full_name
-    `);
+    const result = await query(`SELECT id, full_name, phone_number, membership_status, total_debt, last_paid_date, family_branch FROM members ORDER BY full_name`);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: 'تعذر جلب الأعضاء' });
@@ -447,23 +460,18 @@ app.post('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
 app.put('/api/admin/members/:id', verifyToken, isAdmin, async (req, res) => {
   try {
     const { full_name, phone_number, family_branch, total_debt, last_paid_date, audit_reason } = req.body;
-    
     const oldData = await query(`SELECT total_debt FROM members WHERE id=$1`, [req.params.id]);
     const oldDebt = parseFloat(oldData.rows[0]?.total_debt) || 0;
     const newDebt = parseFloat(total_debt) || 0;
     const diff = newDebt - oldDebt;
 
-    await query(`
-      UPDATE members
-      SET full_name=$1, phone_number=$2, family_branch=$3, total_debt=$4, last_paid_date=$5
-      WHERE id=$6
-    `, [full_name, phone_number, family_branch, total_debt, last_paid_date || null, req.params.id]);
+    await query(`UPDATE members SET full_name=$1, phone_number=$2, family_branch=$3, total_debt=$4, last_paid_date=$5 WHERE id=$6`, 
+      [full_name, phone_number, family_branch, total_debt, last_paid_date || null, req.params.id]);
 
     if (diff !== 0) {
       await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
         ['Admin', req.params.id, 'تعديل ذمة يدوي', diff, audit_reason || 'تعديل من لوحة الإدارة']);
     }
-
     res.json({ message: 'تم تحديث بيانات العضو' });
   } catch (error) {
     res.status(500).json({ error: 'تعذر تحديث العضو' });
@@ -486,7 +494,6 @@ app.post('/api/admin/members/bulk-dues', verifyToken, isAdmin, async (req, res) 
     let q = `UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE 1=1`;
     const params = [amount];
     let idx = 2;
-    
     if (branch && branch !== 'all') { q += ` AND family_branch = $${idx++}`; params.push(branch); }
     if (status && status !== 'all') { q += ` AND membership_status = $${idx++}`; params.push(status); }
     
@@ -500,20 +507,17 @@ app.post('/api/admin/members/bulk-dues', verifyToken, isAdmin, async (req, res) 
       );
       await Promise.all(promises);
     }
-
     res.json({ message: `تمت إضافة ${amount} د.أ على ${result.rowCount} عضو بنجاح` });
   } catch (error) {
     res.status(500).json({ error: 'تعذر تطبيق الذمم الجماعية' });
   }
 });
 
-// ── مسار التدقيق المحدث: معالجة اسم الصندوق العام ──
 app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
       SELECT a.*, COALESCE(m.full_name, 'الصندوق العام') as full_name 
-      FROM audit_logs a
-      LEFT JOIN members m ON a.member_id = m.id
+      FROM audit_logs a LEFT JOIN members m ON a.member_id = m.id
       ORDER BY a.created_at DESC LIMIT 200
     `);
     res.json(result.rows);
@@ -535,7 +539,6 @@ const initializeDB = async () => {
     await query(`ALTER TABLE pending_receipts ADD COLUMN IF NOT EXISTS for_month INT, ADD COLUMN IF NOT EXISTS for_year INT`);
     await query(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS member_id UUID`);
     await query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS family_branch VARCHAR(100) DEFAULT 'غير محدد'`);
-    
     await query(`
       CREATE TABLE IF NOT EXISTS audit_logs (
         id SERIAL PRIMARY KEY,

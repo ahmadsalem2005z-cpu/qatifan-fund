@@ -290,6 +290,34 @@ app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
+// 💡 المسار المفقود الذي تم استعادته
+app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT m.full_name, m.phone_number, m.membership_status, m.total_debt, m.last_paid_date,
+             COALESCE(SUM(s.amount), 0) as total_paid
+      FROM members m
+      LEFT JOIN subscriptions s ON m.id = s.member_id AND s.status = 'paid'
+      GROUP BY m.id
+      ORDER BY m.full_name
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'تعذر جلب التقرير' });
+  }
+});
+
+app.get('/api/admin/reports/annual', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { year } = req.query; const targetYear = year || new Date().getFullYear();
+    const income = await query(`SELECT COALESCE(SUM(amount), 0) as total FROM subscriptions WHERE status = 'paid' AND EXTRACT(YEAR FROM payment_date) = $1`, [targetYear]);
+    const expenses = await query(`SELECT COALESCE(SUM(amount), 0) as total, category FROM expenses WHERE EXTRACT(YEAR FROM expense_date) = $1 GROUP BY category`, [targetYear]);
+    const totalExp = expenses.rows.reduce((sum, row) => sum + parseFloat(row.total), 0);
+    const membersData = await query(`SELECT COUNT(*) as active_members, COALESCE(SUM(total_debt), 0) as total_debt FROM members WHERE membership_status = 'active'`);
+    res.json({ year: targetYear, total_income: parseFloat(income.rows[0].total), total_expenses: totalExp, expenses_breakdown: expenses.rows, active_members: parseInt(membersData.rows[0].active_members), total_debt: parseFloat(membersData.rows[0].total_debt) });
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
 // ── CRUD & Member Admin Routes ──
 app.get('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
   try {
@@ -356,64 +384,31 @@ app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// ── مسارات تنبيهات الواتساب الآلية (الجديدة) ──
-
-// 1. توليد الرسائل ووضعها في الطابور
+// ── Notifications ──
 app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, res) => {
   try {
-    // نجلب جميع الأعضاء النشطين الذين لديهم ديون
     const debtors = await query(`SELECT id, full_name, phone_number, total_debt FROM members WHERE membership_status = 'active' AND total_debt > 0`);
     let queuedCount = 0;
-
     for (let member of debtors.rows) {
-      // تجهيز الرسالة
       const msg = `مرحباً ابن العم ${member.full_name}،\nنود تذكيرك بلطف أن إجمالي الذمة المستحقة لصندوق عائلة قطيفان هو: *${member.total_debt} د.أ*\n\nلإرفاق وصل التسديد أو مراجعة كشف حسابك، تفضل بزيارة التطبيق:\nhttps://qatifan-member.vercel.app`;
-      
-      // إدخالها في جدول الطابور
       await query(`INSERT INTO notification_queue (member_id, phone_number, message_body) VALUES ($1, $2, $3)`, [member.id, member.phone_number, msg]);
       queuedCount++;
     }
     res.json({ message: `تم تجهيز ${queuedCount} رسالة واتساب ووضعها في الطابور بنجاح.` });
-  } catch (error) {
-    logger.error('Error generating notifications:', error);
-    res.status(500).json({ error: 'تعذر توليد الرسائل' });
-  }
+  } catch (error) { res.status(500).json({ error: 'تعذر التوليد' }); }
 });
 
-// 2. جلب الرسائل المعلقة لعرضها للمدير
 app.get('/api/admin/notifications', verifyToken, isAdmin, async (req, res) => {
   try {
-    const result = await query(`
-      SELECT n.*, m.full_name 
-      FROM notification_queue n 
-      JOIN members m ON n.member_id = m.id 
-      WHERE n.status = 'pending' 
-      ORDER BY n.created_at DESC
-    `);
+    const result = await query(`SELECT n.*, m.full_name FROM notification_queue n JOIN members m ON n.member_id = m.id WHERE n.status = 'pending' ORDER BY n.created_at DESC`);
     res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: 'تعذر جلب التنبيهات' });
-  }
+  } catch (error) { res.status(500).json({ error: 'تعذر الجلب' }); }
 });
 
-// 3. تأكيد إرسال رسالة محددة وحذفها من الطابور
 app.post('/api/admin/notifications/:id/sent', verifyToken, isAdmin, async (req, res) => {
   try {
     await query(`UPDATE notification_queue SET status = 'sent', processed_at = CURRENT_TIMESTAMP WHERE id = $1`, [req.params.id]);
     res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: 'حدث خطأ' });
-  }
-});
-
-app.get('/api/admin/reports/annual', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const { year } = req.query; const targetYear = year || new Date().getFullYear();
-    const income = await query(`SELECT COALESCE(SUM(amount), 0) as total FROM subscriptions WHERE status = 'paid' AND EXTRACT(YEAR FROM payment_date) = $1`, [targetYear]);
-    const expenses = await query(`SELECT COALESCE(SUM(amount), 0) as total, category FROM expenses WHERE EXTRACT(YEAR FROM expense_date) = $1 GROUP BY category`, [targetYear]);
-    const totalExp = expenses.rows.reduce((sum, row) => sum + parseFloat(row.total), 0);
-    const membersData = await query(`SELECT COUNT(*) as active_members, COALESCE(SUM(total_debt), 0) as total_debt FROM members WHERE membership_status = 'active'`);
-    res.json({ year: targetYear, total_income: parseFloat(income.rows[0].total), total_expenses: totalExp, expenses_breakdown: expenses.rows, active_members: parseInt(membersData.rows[0].active_members), total_debt: parseFloat(membersData.rows[0].total_debt) });
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -423,19 +418,7 @@ const initializeDB = async () => {
     await query(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS member_id UUID`);
     await query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS family_branch VARCHAR(100) DEFAULT 'غير محدد'`);
     await query(`CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, admin_id VARCHAR(50) DEFAULT 'Admin', member_id UUID REFERENCES members(id) ON DELETE SET NULL, action VARCHAR(100), amount DECIMAL(10,2), reason TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
-    
-    // 💡 إنشاء جدول طابور الواتساب
-    await query(`
-      CREATE TABLE IF NOT EXISTS notification_queue (
-        id SERIAL PRIMARY KEY,
-        member_id UUID REFERENCES members(id) ON DELETE CASCADE,
-        phone_number VARCHAR(20) NOT NULL,
-        message_body TEXT NOT NULL,
-        status VARCHAR(20) DEFAULT 'pending',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        processed_at TIMESTAMP
-      )
-    `);
+    await query(`CREATE TABLE IF NOT EXISTS notification_queue (id SERIAL PRIMARY KEY, member_id UUID REFERENCES members(id) ON DELETE CASCADE, phone_number VARCHAR(20) NOT NULL, message_body TEXT NOT NULL, status VARCHAR(20) DEFAULT 'pending', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, processed_at TIMESTAMP)`);
     logger.info("Database schema validated successfully.");
   } catch (e) { logger.error("DB Init Error:", e); }
 };

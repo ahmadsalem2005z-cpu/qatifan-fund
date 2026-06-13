@@ -108,13 +108,13 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
     const donIncomeResult = await query(`SELECT SUM(amount) as total FROM donations`);
     const totalIncome = (parseFloat(subIncomeResult.rows[0].total) || 0) + (parseFloat(donIncomeResult.rows[0].total) || 0);
     
-    const currentDate = new Date();
-    const currentMonth = currentDate.getMonth() + 1;
-    const currentYear = currentDate.getFullYear();
-    const paidThisMonthResult = await query(`SELECT COUNT(*) as paid_count FROM subscriptions WHERE subscription_month = $1 AND subscription_year = $2 AND status = 'paid'`, [currentMonth, currentYear]);
+    // 💡 احتساب الأعضاء الملتزمين الذين ليس عليهم أي ذمم متأخرة
+    const paidThisMonthResult = await query(`SELECT COUNT(*) as paid_count FROM members WHERE membership_status = 'active' AND (total_debt IS NULL OR total_debt <= 0)`);
     const paidCount = parseInt(paidThisMonthResult.rows[0].paid_count) || 0;
+    
     const expectedCount = activeMembers;
     const paidPct = expectedCount > 0 ? Math.round((paidCount / expectedCount) * 100) : 0;
+    
     const expensesSumResult = await query(`SELECT SUM(amount) as total FROM expenses`);
     const totalExpenses = parseFloat(expensesSumResult.rows[0].total) || 0;
     const totalDebtResult = await query(`SELECT SUM(total_debt) as total_unpaid_debt FROM members WHERE membership_status = 'active'`);
@@ -129,7 +129,7 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
       cat: e.cat
     }));
 
-    // 💡 1. جلب أعلى 5 متبرعين للعام الحالي فقط لإنعاش التنافس السنوي
+    const currentYear = new Date().getFullYear();
     const topDonorsYearResult = await query(`
       SELECT donor_name, SUM(amount) as total_donated 
       FROM donations 
@@ -138,12 +138,8 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
       ORDER BY total_donated DESC 
       LIMIT 5
     `, [currentYear]);
-    const topDonorsYear = topDonorsYearResult.rows.map(d => ({
-      name: d.donor_name,
-      amount: parseFloat(d.total_donated)
-    }));
+    const topDonorsYear = topDonorsYearResult.rows.map(d => ({ name: d.donor_name, amount: parseFloat(d.total_donated) }));
 
-    // 💡 2. جلب أعلى 5 متبرعين تراكمي طوال الوقت للتكريم التاريخي
     const topDonorsAllTimeResult = await query(`
       SELECT donor_name, SUM(amount) as total_donated 
       FROM donations 
@@ -151,10 +147,7 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
       ORDER BY total_donated DESC 
       LIMIT 5
     `);
-    const topDonorsAllTime = topDonorsAllTimeResult.rows.map(d => ({
-      name: d.donor_name,
-      amount: parseFloat(d.total_donated)
-    }));
+    const topDonorsAllTime = topDonorsAllTimeResult.rows.map(d => ({ name: d.donor_name, amount: parseFloat(d.total_donated) }));
 
     res.json({ 
       balance, activeMembers, totalExpenses, paidPct, paidCount, expectedCount, recentExpenses, totalUnpaidDebt, 

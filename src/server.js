@@ -104,7 +104,6 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
     const membersResult = await query(`SELECT COUNT(*) as count FROM members WHERE membership_status = 'active'`);
     const activeMembers = parseInt(membersResult.rows[0].count) || 0;
     
-    // 💡 تعديل حساب الإيرادات ليشمل الاشتراكات والتبرعات معاً
     const subIncomeResult = await query(`SELECT SUM(amount) as total FROM subscriptions WHERE status = 'paid'`);
     const donIncomeResult = await query(`SELECT SUM(amount) as total FROM donations`);
     const totalIncome = (parseFloat(subIncomeResult.rows[0].total) || 0) + (parseFloat(donIncomeResult.rows[0].total) || 0);
@@ -254,19 +253,35 @@ app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// 💡 المسار الجديد: إضافة تبرع للصندوق
+// 💡 تحديث مسار التبرعات ليقوم بإصدار إعلان تلقائي
 app.post('/api/admin/donations', verifyToken, isAdmin, async (req, res) => {
   try {
-    const { member_id, donor_name, amount, note } = req.body;
-    const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
-    const finalDonorName = donor_name || 'فاعل خير';
+    const { member_id, donor_name, amount, note, publish_announcement } = req.body;
+    let targetMemberId = null;
+    let finalDonorName = donor_name || 'فاعل خير';
+
+    // إذا تم اختيار عضو مسجل، نجلب اسمه لنوثق التبرع بدقة
+    if (typeof member_id === 'string' && member_id.trim() !== "") {
+      targetMemberId = member_id.trim();
+      const memRes = await query(`SELECT full_name FROM members WHERE id = $1`, [targetMemberId]);
+      if(memRes.rows.length > 0 && !donor_name) {
+          finalDonorName = memRes.rows[0].full_name;
+      }
+    }
     
-    // إدخال التبرع
+    // إدخال التبرع في الجدول
     await query(`INSERT INTO donations (member_id, donor_name, amount) VALUES ($1, $2, $3)`, [targetMemberId, finalDonorName, amount]);
     
     // تسجيل التدقيق المالي
     await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
       ['Admin', targetMemberId, 'تسجيل تبرع', amount, note || `تبرع من: ${finalDonorName}`]);
+      
+    // 💡 نشر إعلان الشكر والتقدير إذا تم تفعيل الخيار
+    if (publish_announcement) {
+        const title = "شكر وتقدير 🌟";
+        const body = `تتقدم إدارة صندوق عائلة قطيفان بجزيل الشكر والامتنان لـ "${finalDonorName}" على تبرعه السخي ودعمه للصندوق بقيمة ${amount} د.أ.\nنسأل الله أن يخلف عليه بالخير ويبارك له في ماله وأهله.`;
+        await query(`INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, [title, body, 'honor', null]);
+    }
       
     res.json({ message: 'تم تسجيل التبرع بنجاح' });
   } catch (error) { res.status(500).json({ error: 'خطأ أثناء تسجيل التبرع' }); }
@@ -328,7 +343,6 @@ app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => 
   }
 });
 
-// 💡 تعديل التقرير السنوي ليفصل الإيرادات إلى (اشتراكات وتبرعات)
 app.get('/api/admin/reports/annual', verifyToken, isAdmin, async (req, res) => {
   try {
     const { year } = req.query; const targetYear = year || new Date().getFullYear();
@@ -473,7 +487,6 @@ const initializeDB = async () => {
     await query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS family_branch VARCHAR(100) DEFAULT 'غير محدد'`);
     await query(`CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, admin_id VARCHAR(50) DEFAULT 'Admin', member_id UUID REFERENCES members(id) ON DELETE SET NULL, action VARCHAR(100), amount DECIMAL(10,2), reason TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
     await query(`CREATE TABLE IF NOT EXISTS notification_queue (id SERIAL PRIMARY KEY, member_id UUID REFERENCES members(id) ON DELETE CASCADE, phone_number VARCHAR(20) NOT NULL, message_body TEXT NOT NULL, status VARCHAR(20) DEFAULT 'pending', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, processed_at TIMESTAMP)`);
-    // 💡 إنشاء جدول التبرعات
     await query(`CREATE TABLE IF NOT EXISTS donations (id SERIAL PRIMARY KEY, member_id UUID REFERENCES members(id) ON DELETE SET NULL, donor_name VARCHAR(255), amount DECIMAL(10,2) NOT NULL, donation_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
     logger.info("Database schema validated successfully.");
   } catch (e) { logger.error("DB Init Error:", e); }

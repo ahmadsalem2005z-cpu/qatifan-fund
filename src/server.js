@@ -103,8 +103,12 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
   try {
     const membersResult = await query(`SELECT COUNT(*) as count FROM members WHERE membership_status = 'active'`);
     const activeMembers = parseInt(membersResult.rows[0].count) || 0;
-    const incomeResult = await query(`SELECT SUM(amount) as total_income FROM subscriptions WHERE status = 'paid'`);
-    const totalIncome = parseFloat(incomeResult.rows[0].total_income) || 0;
+    
+    // 💡 تعديل حساب الإيرادات ليشمل الاشتراكات والتبرعات معاً
+    const subIncomeResult = await query(`SELECT SUM(amount) as total FROM subscriptions WHERE status = 'paid'`);
+    const donIncomeResult = await query(`SELECT SUM(amount) as total FROM donations`);
+    const totalIncome = (parseFloat(subIncomeResult.rows[0].total) || 0) + (parseFloat(donIncomeResult.rows[0].total) || 0);
+    
     const currentDate = new Date();
     const currentMonth = currentDate.getMonth() + 1;
     const currentYear = currentDate.getFullYear();
@@ -250,6 +254,24 @@ app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
+// 💡 المسار الجديد: إضافة تبرع للصندوق
+app.post('/api/admin/donations', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { member_id, donor_name, amount, note } = req.body;
+    const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
+    const finalDonorName = donor_name || 'فاعل خير';
+    
+    // إدخال التبرع
+    await query(`INSERT INTO donations (member_id, donor_name, amount) VALUES ($1, $2, $3)`, [targetMemberId, finalDonorName, amount]);
+    
+    // تسجيل التدقيق المالي
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
+      ['Admin', targetMemberId, 'تسجيل تبرع', amount, note || `تبرع من: ${finalDonorName}`]);
+      
+    res.json({ message: 'تم تسجيل التبرع بنجاح' });
+  } catch (error) { res.status(500).json({ error: 'خطأ أثناء تسجيل التبرع' }); }
+});
+
 app.get('/api/admin/requests', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`SELECT r.*, m.full_name, m.phone_number FROM requests r JOIN members m ON r.member_id = m.id ORDER BY r.created_at DESC`);
@@ -306,14 +328,33 @@ app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => 
   }
 });
 
+// 💡 تعديل التقرير السنوي ليفصل الإيرادات إلى (اشتراكات وتبرعات)
 app.get('/api/admin/reports/annual', verifyToken, isAdmin, async (req, res) => {
   try {
     const { year } = req.query; const targetYear = year || new Date().getFullYear();
-    const income = await query(`SELECT COALESCE(SUM(amount), 0) as total FROM subscriptions WHERE status = 'paid' AND EXTRACT(YEAR FROM payment_date) = $1`, [targetYear]);
+    
+    const subs = await query(`SELECT COALESCE(SUM(amount), 0) as total FROM subscriptions WHERE status = 'paid' AND EXTRACT(YEAR FROM payment_date) = $1`, [targetYear]);
+    const dons = await query(`SELECT COALESCE(SUM(amount), 0) as total FROM donations WHERE EXTRACT(YEAR FROM donation_date) = $1`, [targetYear]);
+    
+    const totalSubs = parseFloat(subs.rows[0].total);
+    const totalDons = parseFloat(dons.rows[0].total);
+    const totalIncome = totalSubs + totalDons;
+
     const expenses = await query(`SELECT COALESCE(SUM(amount), 0) as total, category FROM expenses WHERE EXTRACT(YEAR FROM expense_date) = $1 GROUP BY category`, [targetYear]);
     const totalExp = expenses.rows.reduce((sum, row) => sum + parseFloat(row.total), 0);
+    
     const membersData = await query(`SELECT COUNT(*) as active_members, COALESCE(SUM(total_debt), 0) as total_debt FROM members WHERE membership_status = 'active'`);
-    res.json({ year: targetYear, total_income: parseFloat(income.rows[0].total), total_expenses: totalExp, expenses_breakdown: expenses.rows, active_members: parseInt(membersData.rows[0].active_members), total_debt: parseFloat(membersData.rows[0].total_debt) });
+    
+    res.json({ 
+      year: targetYear, 
+      total_income: totalIncome, 
+      total_subscriptions: totalSubs,
+      total_donations: totalDons,
+      total_expenses: totalExp, 
+      expenses_breakdown: expenses.rows, 
+      active_members: parseInt(membersData.rows[0].active_members), 
+      total_debt: parseFloat(membersData.rows[0].total_debt) 
+    });
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -411,7 +452,6 @@ app.post('/api/admin/notifications/:id/sent', verifyToken, isAdmin, async (req, 
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// 💡 1. مسار حذف رسالة معينة
 app.delete('/api/admin/notifications/:id', verifyToken, isAdmin, async (req, res) => {
   try {
     await query(`DELETE FROM notification_queue WHERE id = $1`, [req.params.id]);
@@ -419,7 +459,6 @@ app.delete('/api/admin/notifications/:id', verifyToken, isAdmin, async (req, res
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// 💡 2. مسار إفراغ الطابور بالكامل
 app.delete('/api/admin/notifications', verifyToken, isAdmin, async (req, res) => {
   try {
     await query(`DELETE FROM notification_queue WHERE status = 'pending'`);
@@ -434,6 +473,8 @@ const initializeDB = async () => {
     await query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS family_branch VARCHAR(100) DEFAULT 'غير محدد'`);
     await query(`CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, admin_id VARCHAR(50) DEFAULT 'Admin', member_id UUID REFERENCES members(id) ON DELETE SET NULL, action VARCHAR(100), amount DECIMAL(10,2), reason TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
     await query(`CREATE TABLE IF NOT EXISTS notification_queue (id SERIAL PRIMARY KEY, member_id UUID REFERENCES members(id) ON DELETE CASCADE, phone_number VARCHAR(20) NOT NULL, message_body TEXT NOT NULL, status VARCHAR(20) DEFAULT 'pending', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, processed_at TIMESTAMP)`);
+    // 💡 إنشاء جدول التبرعات
+    await query(`CREATE TABLE IF NOT EXISTS donations (id SERIAL PRIMARY KEY, member_id UUID REFERENCES members(id) ON DELETE SET NULL, donor_name VARCHAR(255), amount DECIMAL(10,2) NOT NULL, donation_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
     logger.info("Database schema validated successfully.");
   } catch (e) { logger.error("DB Init Error:", e); }
 };

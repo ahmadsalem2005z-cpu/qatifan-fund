@@ -290,11 +290,11 @@ app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// 💡 المسار المفقود الذي تم استعادته
+// ── 💡 إصلاح مسار تقرير ملف الـ Excel التفاعلي الشامل ──
 app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
-      SELECT m.full_name, m.phone_number, m.membership_status, m.total_debt, m.last_paid_date,
+      SELECT m.full_name, m.phone_number, m.family_branch, m.membership_status, m.total_debt, m.last_paid_date,
              COALESCE(SUM(s.amount), 0) as total_paid
       FROM members m
       LEFT JOIN subscriptions s ON m.id = s.member_id AND s.status = 'paid'
@@ -303,7 +303,7 @@ app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => 
     `);
     res.json(result.rows);
   } catch (error) {
-    res.status(500).json({ error: 'تعذر جلب التقرير' });
+    res.status(500).json({ error: 'تعذر جلب التقرير المحدث' });
   }
 });
 

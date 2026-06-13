@@ -129,20 +129,37 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
       cat: e.cat
     }));
 
-    // 💡 جلب أعلى 5 متبرعين طوال الوقت
-    const topDonorsResult = await query(`
+    // 💡 1. جلب أعلى 5 متبرعين للعام الحالي فقط لإنعاش التنافس السنوي
+    const topDonorsYearResult = await query(`
+      SELECT donor_name, SUM(amount) as total_donated 
+      FROM donations 
+      WHERE EXTRACT(YEAR FROM donation_date) = $1
+      GROUP BY donor_name 
+      ORDER BY total_donated DESC 
+      LIMIT 5
+    `, [currentYear]);
+    const topDonorsYear = topDonorsYearResult.rows.map(d => ({
+      name: d.donor_name,
+      amount: parseFloat(d.total_donated)
+    }));
+
+    // 💡 2. جلب أعلى 5 متبرعين تراكمي طوال الوقت للتكريم التاريخي
+    const topDonorsAllTimeResult = await query(`
       SELECT donor_name, SUM(amount) as total_donated 
       FROM donations 
       GROUP BY donor_name 
       ORDER BY total_donated DESC 
       LIMIT 5
     `);
-    const topDonors = topDonorsResult.rows.map(d => ({
+    const topDonorsAllTime = topDonorsAllTimeResult.rows.map(d => ({
       name: d.donor_name,
       amount: parseFloat(d.total_donated)
     }));
 
-    res.json({ balance, activeMembers, totalExpenses, paidPct, paidCount, expectedCount, recentExpenses, totalUnpaidDebt, topDonors });
+    res.json({ 
+      balance, activeMembers, totalExpenses, paidPct, paidCount, expectedCount, recentExpenses, totalUnpaidDebt, 
+      topDonorsYear, topDonorsAllTime 
+    });
   } catch (error) { res.status(500).json({ error: "تعذر حساب ملخص الصندوق" }); }
 });
 
@@ -446,19 +463,6 @@ app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
     const result = await query(`SELECT a.*, COALESCE(m.full_name, 'الصندوق العام') as full_name FROM audit_logs a LEFT JOIN members m ON a.member_id = m.id ORDER BY a.created_at DESC LIMIT 200`);
     res.json(result.rows);
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
-});
-
-app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const debtors = await query(`SELECT id, full_name, phone_number, total_debt FROM members WHERE membership_status = 'active' AND total_debt > 0`);
-    let queuedCount = 0;
-    for (let member of debtors.rows) {
-      const msg = `مرحباً ابن العم ${member.full_name}،\nنود تذكيرك بلطف أن إجمالي الذمة المستحقة لصندوق عائلة قطيفان هو: *${member.total_debt} د.أ*\n\nلإرفاق وصل التسديد أو مراجعة كشف حسابك، تفضل بزيارة التطبيق:\nhttps://qatifan-member.vercel.app`;
-      await query(`INSERT INTO notification_queue (member_id, phone_number, message_body) VALUES ($1, $2, $3)`, [member.id, member.phone_number, msg]);
-      queuedCount++;
-    }
-    res.json({ message: `تم تجهيز ${queuedCount} رسالة واتساب ووضعها في الطابور بنجاح.` });
-  } catch (error) { res.status(500).json({ error: 'تعذر التوليد' }); }
 });
 
 app.get('/api/admin/notifications', verifyToken, isAdmin, async (req, res) => {

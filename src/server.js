@@ -229,8 +229,9 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
   try {
     const receiptId = req.params.id;
     const { amount } = req.body; 
-    const paidAmount = parseFloat(amount) || 2.00;
-    const monthsToAdvance = Math.floor(paidAmount / 2.00); 
+    const paidAmount = parseFloat(amount) || 0;
+
+    if (paidAmount <= 0) return res.status(400).json({error: 'مبلغ غير صحيح'});
 
     const receiptRes = await query(`SELECT member_id, for_month, for_year FROM pending_receipts WHERE id = $1`, [receiptId]);
     if (receiptRes.rows.length === 0) return res.status(404).json({error: 'الإيصال غير موجود'});
@@ -239,33 +240,71 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     const memberRes = await query(`SELECT last_paid_date FROM members WHERE id = $1`, [memberId]);
     const dbLastPaid = memberRes.rows[0].last_paid_date;
 
-    let subYear, subMonth, finalLastPaidDate;
+    let currentYear, currentMonth;
     if (for_year && for_month) {
-      subYear = parseInt(for_year, 10);
-      subMonth = parseInt(for_month, 10);
-      const baseDate = new Date(subYear, subMonth - 1, 1);
-      const newCoveredDate = new Date(baseDate);
-      newCoveredDate.setMonth(newCoveredDate.getMonth() + (monthsToAdvance - 1));
-      finalLastPaidDate = (!dbLastPaid) ? newCoveredDate : (newCoveredDate > new Date(dbLastPaid) ? newCoveredDate : new Date(dbLastPaid));
+      currentYear = parseInt(for_year, 10);
+      currentMonth = parseInt(for_month, 10);
     } else {
       let baseDate = dbLastPaid ? new Date(dbLastPaid) : new Date();
-      if (dbLastPaid) baseDate.setMonth(baseDate.getMonth() + 1);
-      baseDate.setDate(1);
-      subYear = baseDate.getFullYear();
-      subMonth = baseDate.getMonth() + 1;
-      const newCoveredDate = new Date(baseDate);
-      newCoveredDate.setMonth(newCoveredDate.getMonth() + (monthsToAdvance - 1));
-      finalLastPaidDate = newCoveredDate;
+      if (dbLastPaid) {
+        baseDate.setMonth(baseDate.getMonth() + 1);
+      } else {
+        baseDate.setDate(1); 
+      }
+      currentYear = baseDate.getFullYear();
+      currentMonth = baseDate.getMonth() + 1;
     }
 
-    const formattedLastPaidDate = `${finalLastPaidDate.getFullYear()}-${finalLastPaidDate.getMonth() + 1}-01`;
-    await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
-    await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0), last_paid_date = $2 WHERE id = $3`, [paidAmount, formattedLastPaidDate, memberId]);
-    await query(`INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date) VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)`, [memberId, subYear, subMonth, paidAmount]);
-    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', memberId, 'اعتماد إيصال', paidAmount, `تغطية ${monthsToAdvance} أشهر وتحديث التاريخ`]);
+    let remainingAmount = paidAmount;
+    let monthsAdvanced = 0;
+    const subscriptionsToInsert = [];
 
-    res.json({ message: 'تم الاعتماد بنجاح', advancedMonths: monthsToAdvance });
-  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+    while (remainingAmount > 0) {
+      const monthlyFee = (currentYear <= 2015) ? 1.00 : 2.00;
+
+      if (remainingAmount >= monthlyFee) {
+        remainingAmount -= monthlyFee;
+        monthsAdvanced++;
+        subscriptionsToInsert.push({ year: currentYear, month: currentMonth, fee: monthlyFee });
+
+        currentMonth++;
+        if (currentMonth > 12) {
+          currentMonth = 1;
+          currentYear++;
+        }
+      } else {
+        break;
+      }
+    }
+
+    if (monthsAdvanced === 0) {
+      return res.status(400).json({ error: 'المبلغ المدفوع لا يكفي لتغطية شهر واحد بناءً على التسعيرة المقررة.' });
+    }
+
+    const finalSub = subscriptionsToInsert[subscriptionsToInsert.length - 1];
+    const formattedLastPaidDate = `${finalSub.year}-${finalSub.month}-01`;
+
+    await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
+
+    const totalUsed = paidAmount - remainingAmount;
+    await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0), last_paid_date = $2 WHERE id = $3`, [totalUsed, formattedLastPaidDate, memberId]);
+
+    for (const sub of subscriptionsToInsert) {
+      await query(
+        `INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date) VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)`, 
+        [memberId, sub.year, sub.month, sub.fee]
+      );
+    }
+
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
+      ['Admin', memberId, 'اعتماد إيصال', totalUsed, `تغطية ${monthsAdvanced} أشهر (حتى ${finalSub.month}/${finalSub.year})`]
+    );
+
+    res.json({ message: 'تم الاعتماد بنجاح', advancedMonths: monthsAdvanced });
+  } catch (error) { 
+    logger.error("Approve Receipt Error:", error);
+    res.status(500).json({ error: 'حدث خطأ أثناء اعتماد الإيصال' }); 
+  }
 });
 
 app.post('/api/admin/reject-receipt/:id', verifyToken, isAdmin, async (req, res) => {

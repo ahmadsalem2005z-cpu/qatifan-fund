@@ -120,6 +120,7 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
     const totalDebtResult = await query(`SELECT SUM(total_debt) as total_unpaid_debt FROM members WHERE membership_status = 'active'`);
     const totalUnpaidDebt = parseFloat(totalDebtResult.rows[0].total_unpaid_debt) || 0;
     const balance = totalIncome - totalExpenses;
+    
     const recentExpensesResult = await query(`SELECT category AS cat, label, amount, expense_date AS date FROM expenses ORDER BY expense_date DESC LIMIT 5`);
     const recentExpenses = recentExpensesResult.rows.map(e => ({
       icon: e.cat === "wedding" ? "💍" : e.cat === "condolence" ? "🕊️" : "🚨",
@@ -127,7 +128,21 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
       date: new Date(e.date).toLocaleDateString('ar-JO', { day: 'numeric', month: 'long', year: 'numeric', numberingSystem: 'latn' }),
       cat: e.cat
     }));
-    res.json({ balance, activeMembers, totalExpenses, paidPct, paidCount, expectedCount, recentExpenses, totalUnpaidDebt });
+
+    // 💡 جلب أعلى 5 متبرعين طوال الوقت
+    const topDonorsResult = await query(`
+      SELECT donor_name, SUM(amount) as total_donated 
+      FROM donations 
+      GROUP BY donor_name 
+      ORDER BY total_donated DESC 
+      LIMIT 5
+    `);
+    const topDonors = topDonorsResult.rows.map(d => ({
+      name: d.donor_name,
+      amount: parseFloat(d.total_donated)
+    }));
+
+    res.json({ balance, activeMembers, totalExpenses, paidPct, paidCount, expectedCount, recentExpenses, totalUnpaidDebt, topDonors });
   } catch (error) { res.status(500).json({ error: "تعذر حساب ملخص الصندوق" }); }
 });
 
@@ -253,14 +268,12 @@ app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// 💡 تحديث مسار التبرعات ليقوم بإصدار إعلان تلقائي
 app.post('/api/admin/donations', verifyToken, isAdmin, async (req, res) => {
   try {
     const { member_id, donor_name, amount, note, publish_announcement } = req.body;
     let targetMemberId = null;
     let finalDonorName = donor_name || 'فاعل خير';
 
-    // إذا تم اختيار عضو مسجل، نجلب اسمه لنوثق التبرع بدقة
     if (typeof member_id === 'string' && member_id.trim() !== "") {
       targetMemberId = member_id.trim();
       const memRes = await query(`SELECT full_name FROM members WHERE id = $1`, [targetMemberId]);
@@ -269,14 +282,11 @@ app.post('/api/admin/donations', verifyToken, isAdmin, async (req, res) => {
       }
     }
     
-    // إدخال التبرع في الجدول
     await query(`INSERT INTO donations (member_id, donor_name, amount) VALUES ($1, $2, $3)`, [targetMemberId, finalDonorName, amount]);
     
-    // تسجيل التدقيق المالي
     await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
       ['Admin', targetMemberId, 'تسجيل تبرع', amount, note || `تبرع من: ${finalDonorName}`]);
       
-    // 💡 نشر إعلان الشكر والتقدير إذا تم تفعيل الخيار
     if (publish_announcement) {
         const title = "شكر وتقدير 🌟";
         const body = `تتقدم إدارة صندوق عائلة قطيفان بجزيل الشكر والامتنان لـ "${finalDonorName}" على تبرعه السخي ودعمه للصندوق بقيمة ${amount} د.أ.\nنسأل الله أن يخلف عليه بالخير ويبارك له في ماله وأهله.`;
@@ -438,7 +448,6 @@ app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// ── Notifications ──
 app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, res) => {
   try {
     const debtors = await query(`SELECT id, full_name, phone_number, total_debt FROM members WHERE membership_status = 'active' AND total_debt > 0`);

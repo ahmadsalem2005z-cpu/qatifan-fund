@@ -290,7 +290,6 @@ app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// ── 💡 إصلاح مسار تقرير ملف الـ Excel التفاعلي الشامل ──
 app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
@@ -408,6 +407,22 @@ app.get('/api/admin/notifications', verifyToken, isAdmin, async (req, res) => {
 app.post('/api/admin/notifications/:id/sent', verifyToken, isAdmin, async (req, res) => {
   try {
     await query(`UPDATE notification_queue SET status = 'sent', processed_at = CURRENT_TIMESTAMP WHERE id = $1`, [req.params.id]);
+    res.json({ success: true });
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// 💡 1. مسار حذف رسالة معينة
+app.delete('/api/admin/notifications/:id', verifyToken, isAdmin, async (req, res) => {
+  try {
+    await query(`DELETE FROM notification_queue WHERE id = $1`, [req.params.id]);
+    res.json({ success: true });
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// 💡 2. مسار إفراغ الطابور بالكامل
+app.delete('/api/admin/notifications', verifyToken, isAdmin, async (req, res) => {
+  try {
+    await query(`DELETE FROM notification_queue WHERE status = 'pending'`);
     res.json({ success: true });
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });

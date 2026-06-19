@@ -30,6 +30,32 @@ app.use(cors({
 
 app.use(express.json());
 
+// ── دالة حساب الديون الديناميكية مع مراعاة تسعيرة 2015 وما قبلها ──
+const calculateDynamicSubscriptionDebt = (lastPaidDateStr) => {
+  const lastPaid = new Date(lastPaidDateStr);
+  const today = new Date();
+  let debt = 0;
+  
+  let currentYear = lastPaid.getFullYear();
+  let currentMonth = lastPaid.getMonth();
+  
+  const endYear = today.getFullYear();
+  const endMonth = today.getMonth();
+
+  while (currentYear < endYear || (currentYear === endYear && currentMonth < endMonth)) {
+    // التسعيرة: 1 دينار لعام 2015 وما قبله، و 2 دينار لعام 2016 وما بعده
+    const fee = (currentYear <= 2015) ? 1.00 : 2.00;
+    debt += fee;
+    
+    currentMonth++;
+    if (currentMonth > 11) {
+      currentMonth = 0;
+      currentYear++;
+    }
+  }
+  return debt;
+};
+
 // ── Public Routes ──
 app.get('/api/health', (req, res) => {
   res.status(200).json({ message: 'السيرفر مستيقظ ويعمل بنجاح!' });
@@ -101,24 +127,44 @@ app.post('/auth/reset-password', async (req, res) => {
 // ── Member Routes ──
 app.get('/api/fund/summary', verifyToken, async (req, res) => {
   try {
-    const membersResult = await query(`SELECT COUNT(*) as count FROM members WHERE membership_status = 'active'`);
-    const activeMembers = parseInt(membersResult.rows[0].count) || 0;
+    const activeMembersRes = await query(`
+      SELECT id, COALESCE(total_debt, 0) as existing_debt, 
+             COALESCE(last_paid_date, created_at) as last_paid
+      FROM members 
+      WHERE membership_status = 'active'
+    `);
+    
+    const activeMembers = activeMembersRes.rows.length;
     
     const subIncomeResult = await query(`SELECT SUM(amount) as total FROM subscriptions WHERE status = 'paid'`);
     const donIncomeResult = await query(`SELECT SUM(amount) as total FROM donations`);
     const totalIncome = (parseFloat(subIncomeResult.rows[0].total) || 0) + (parseFloat(donIncomeResult.rows[0].total) || 0);
     
-    const paidThisMonthResult = await query(`SELECT COUNT(*) as paid_count FROM members WHERE membership_status = 'active' AND (total_debt IS NULL OR total_debt <= 0)`);
-    const paidCount = parseInt(paidThisMonthResult.rows[0].paid_count) || 0;
-    
-    const expectedCount = activeMembers;
-    const paidPct = expectedCount > 0 ? Math.round((paidCount / expectedCount) * 100) : 0;
-    
     const expensesSumResult = await query(`SELECT SUM(amount) as total FROM expenses`);
     const totalExpenses = parseFloat(expensesSumResult.rows[0].total) || 0;
-    const totalDebtResult = await query(`SELECT SUM(total_debt) as total_unpaid_debt FROM members WHERE membership_status = 'active'`);
-    const totalUnpaidDebt = parseFloat(totalDebtResult.rows[0].total_unpaid_debt) || 0;
+    
     const balance = totalIncome - totalExpenses;
+
+    let realTotalUnpaidDebt = 0;
+    let committedMembersCount = 0;
+
+    for (const member of activeMembersRes.rows) {
+      // استخدام الدالة الديناميكية لحساب الديون المتأخرة (1 د.أ أو 2 د.أ حسب السنة)
+      const subscriptionDebt = calculateDynamicSubscriptionDebt(member.last_paid);
+      const otherDebt = parseFloat(member.existing_debt);
+      const totalOwed = subscriptionDebt + otherDebt;
+
+      realTotalUnpaidDebt += totalOwed;
+
+      if (totalOwed <= 0) {
+        committedMembersCount++;
+      }
+    }
+
+    const paidCount = committedMembersCount;
+    const expectedCount = activeMembers;
+    const paidPct = expectedCount > 0 ? Math.round((paidCount / expectedCount) * 100) : 0;
+    const totalUnpaidDebt = realTotalUnpaidDebt;
     
     const recentExpensesResult = await query(`SELECT category AS cat, label, amount, expense_date AS date FROM expenses ORDER BY expense_date DESC LIMIT 5`);
     const recentExpenses = recentExpensesResult.rows.map(e => ({
@@ -185,7 +231,6 @@ app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (re
     const receiptUrl = req.file.path;
     const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId);
     
-    // تم إلغاء استقبال for_month و for_year من التطبيق لضمان التسلسل التلقائي فقط
     await query(`INSERT INTO pending_receipts (member_id, receipt_url, for_month, for_year, status) VALUES ($1, $2, NULL, NULL, 'pending')`, [memberId, receiptUrl]);
     res.status(200).json({ message: 'تم الرفع بنجاح', url: receiptUrl });
   } catch (err) { res.status(500).json({ error: 'حدث خطأ' }); }
@@ -217,7 +262,6 @@ app.get('/api/admin/pending-receipts', verifyToken, isAdmin, async (req, res) =>
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// 💡 هنا التعديل المحوري لمعالجة الأشهر بالتتابع الرياضي 💡
 app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res) => {
   try {
     const receiptId = req.params.id;
@@ -231,7 +275,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     
     const memberId = receiptRes.rows[0].member_id;
 
-    // 1. استخراج آخر شهر فعلي مسجل في النظام لضمان التتابع (نتجاهل أي تاريخ آخر)
     const lastSubRes = await query(`
       SELECT subscription_year, subscription_month 
       FROM subscriptions 
@@ -243,7 +286,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     let currentYear, currentMonth;
 
     if (lastSubRes.rows.length > 0) {
-      // بناء التسلسل مباشرة من آخر شهر مسجل في قاعدة البيانات
       const lastYear = parseInt(lastSubRes.rows[0].subscription_year, 10);
       const lastMonth = parseInt(lastSubRes.rows[0].subscription_month, 10);
       
@@ -254,7 +296,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
         currentYear++;
       }
     } else {
-      // إذا كان عضواً جديداً لم يسبق له الدفع، نبدأ من تاريخ آخرین دفعة أو تاريخ إنشاء الحساب
       const memberRes = await query(`SELECT last_paid_date, created_at FROM members WHERE id = $1`, [memberId]);
       const dbLastPaid = memberRes.rows[0].last_paid_date;
       
@@ -272,8 +313,8 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     let monthsAdvanced = 0;
     const subscriptionsToInsert = [];
 
-    // توزيع الدفعة على الأشهر المتتابعة
     while (remainingAmount > 0) {
+      // 💡 التسعيرة تعتمد على السنة
       const monthlyFee = (currentYear <= 2015) ? 1.00 : 2.00;
 
       if (remainingAmount >= monthlyFee) {
@@ -303,7 +344,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     const totalUsed = paidAmount - remainingAmount;
     await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0), last_paid_date = $2 WHERE id = $3`, [totalUsed, formattedLastPaidDate, memberId]);
 
-    // الإدراج في دفتر الاشتراكات بالتتابع الصحيح
     for (const sub of subscriptionsToInsert) {
       await query(
         `INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date) VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)`, 
@@ -537,14 +577,10 @@ app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, 
     `);
 
     let generatedCount = 0;
-    const today = new Date();
 
     for (const member of membersRes.rows) {
-      const lastPaid = new Date(member.last_paid);
-      let monthsLate = (today.getFullYear() - lastPaid.getFullYear()) * 12 + (today.getMonth() - lastPaid.getMonth());
-      if (monthsLate < 0) monthsLate = 0;
-
-      const subscriptionDebt = monthsLate * 2.00;
+      // 💡 استخدام نفس الدالة الديناميكية لحساب الاشتراكات المتأخرة لتوليد رسائل الواتساب
+      const subscriptionDebt = calculateDynamicSubscriptionDebt(member.last_paid);
       const otherDebt = parseFloat(member.existing_debt);
       const totalOwed = subscriptionDebt + otherDebt;
 

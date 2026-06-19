@@ -277,7 +277,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
 
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
     
-    // 💡 الإصلاح الجذري لمشكلة الديون المعلقة: نقوم بخصم المبلغ المدفوع من حقل الديون المتراكمة القديمة 
     await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0), last_paid_date = $2 WHERE id = $3`, [paidAmount, formattedLastPaidDate, memberId]);
 
     for (const sub of subscriptionsToInsert) {
@@ -498,20 +497,23 @@ app.get('/api/admin/notifications', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'تعذر الجلب' }); }
 });
 
+// 💡 هنا التحديث الجديد لصيغة رسالة الواتساب 💡
 app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, res) => {
   try {
     await query(`DELETE FROM notification_queue WHERE status = 'pending'`);
     const membersRes = await query(`SELECT id, full_name, phone_number, COALESCE(total_debt, 0) as existing_debt, COALESCE(last_paid_date, created_at) as last_paid FROM members WHERE membership_status = 'active'`);
     let generatedCount = 0;
+    
     for (const member of membersRes.rows) {
       const subscriptionDebt = calculateDynamicSubscriptionDebt(member.last_paid);
       const otherDebt = parseFloat(member.existing_debt);
       const totalOwed = subscriptionDebt + otherDebt;
+      
       if (totalOwed > 0) {
         await query(`INSERT INTO notification_queue (member_id, phone_number, message_body) VALUES ($1, $2, $3)`, [
           member.id, 
           member.phone_number, 
-          `يا ميت هلا بابن العم ${member.full_name}، يسعد أوقاتك يا غالي.\n\nحبينا نذكرك إنه معلّق بذمتك لصندوق العيلة مبلغ ${totalOwed} دينار.\nهمتك معانا يا أصيل تانظل ساندين بعض وكتف بكتف، وبارك الله بمالك وعيالك 🌾.`
+          `مرحباً ${member.full_name}، نذكركم بوجود ذمم مستحقة لصندوق العائلة بقيمة ${totalOwed} د.أ (اشتراكات متأخرة: ${subscriptionDebt} د.أ، ذمم وسلف أخرى: ${otherDebt} د.أ). يرجى المبادرة بالسداد.`
         ]);
         generatedCount++;
       }

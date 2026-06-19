@@ -32,6 +32,7 @@ app.use(express.json());
 
 // ── دالة حساب الديون الديناميكية مع مراعاة تسعيرة 2015 وما قبلها ──
 const calculateDynamicSubscriptionDebt = (lastPaidDateStr) => {
+  if (!lastPaidDateStr) return 0;
   const lastPaid = new Date(lastPaidDateStr);
   const today = new Date();
   let debt = 0;
@@ -43,7 +44,6 @@ const calculateDynamicSubscriptionDebt = (lastPaidDateStr) => {
   const endMonth = today.getMonth();
 
   while (currentYear < endYear || (currentYear === endYear && currentMonth < endMonth)) {
-    // التسعيرة: 1 دينار لعام 2015 وما قبله، و 2 دينار لعام 2016 وما بعده
     const fee = (currentYear <= 2015) ? 1.00 : 2.00;
     debt += fee;
     
@@ -149,7 +149,6 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
     let committedMembersCount = 0;
 
     for (const member of activeMembersRes.rows) {
-      // استخدام الدالة الديناميكية لحساب الديون المتأخرة (1 د.أ أو 2 د.أ حسب السنة)
       const subscriptionDebt = calculateDynamicSubscriptionDebt(member.last_paid);
       const otherDebt = parseFloat(member.existing_debt);
       const totalOwed = subscriptionDebt + otherDebt;
@@ -205,7 +204,15 @@ app.get('/api/member/account', verifyToken, async (req, res) => {
   try {
     const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId) || null;
     const result = await query(`SELECT m.*, json_agg(s ORDER BY s.subscription_year DESC, s.subscription_month DESC) as subscriptions FROM members m LEFT JOIN subscriptions s ON s.member_id = m.id WHERE m.id = $1 GROUP BY m.id`, [memberId]);
-    res.json(result.rows[0]);
+    
+    if (result.rows.length > 0) {
+      const member = result.rows[0];
+      const subDebt = calculateDynamicSubscriptionDebt(member.last_paid_date || member.created_at);
+      member.total_debt = parseFloat(member.total_debt || 0) + subDebt;
+      res.json(member);
+    } else {
+      res.status(404).json({error: 'Member not found'});
+    }
   } catch (error) { res.status(500).json({ error: 'تعذر جلب البيانات' }); }
 });
 
@@ -213,6 +220,7 @@ app.get('/api/member/statement', verifyToken, async (req, res) => {
   try {
     const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId) || null;
     const { startDate, endDate } = req.query;
+    
     let queryStr = `SELECT * FROM subscriptions WHERE member_id = $1 AND status = 'paid'`;
     const params = [memberId];
     let paramIdx = 2;
@@ -220,8 +228,15 @@ app.get('/api/member/statement', verifyToken, async (req, res) => {
     if (endDate) { queryStr += ` AND payment_date <= $${paramIdx++}`; params.push(endDate + ' 23:59:59'); }
     queryStr += ` ORDER BY payment_date ASC`;
     const subs = await query(queryStr, params);
-    const memberData = await query(`SELECT full_name, phone_number, total_debt, membership_status, family_branch FROM members WHERE id = $1`, [memberId]);
-    res.json({ member: memberData.rows[0], payments: subs.rows, total_paid_in_period: subs.rows.reduce((sum, s) => sum + parseFloat(s.amount), 0) });
+    
+    const memberData = await query(`SELECT full_name, phone_number, total_debt, last_paid_date, created_at, membership_status, family_branch FROM members WHERE id = $1`, [memberId]);
+    const member = memberData.rows[0];
+    
+    // 💡 دمج الذمم المتأخرة ديناميكياً لتظهر بشكل صحيح في كشف الـ PDF 
+    const subDebt = calculateDynamicSubscriptionDebt(member.last_paid_date || member.created_at);
+    member.total_debt = parseFloat(member.total_debt || 0) + subDebt;
+
+    res.json({ member: member, payments: subs.rows, total_paid_in_period: subs.rows.reduce((sum, s) => sum + parseFloat(s.amount), 0) });
   } catch (error) { res.status(500).json({ error: 'تعذر الإصدار' }); }
 });
 
@@ -314,7 +329,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     const subscriptionsToInsert = [];
 
     while (remainingAmount > 0) {
-      // 💡 التسعيرة تعتمد على السنة
       const monthlyFee = (currentYear <= 2015) ? 1.00 : 2.00;
 
       if (remainingAmount >= monthlyFee) {
@@ -448,17 +462,25 @@ app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
+// 💡 تطبيق الدالة الديناميكية على تقرير الأعضاء المصدر بـ CSV
 app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`
-      SELECT m.full_name, m.phone_number, m.family_branch, m.membership_status, m.total_debt, m.last_paid_date,
+      SELECT m.full_name, m.phone_number, m.family_branch, m.membership_status, m.total_debt, m.last_paid_date, m.created_at,
              COALESCE(SUM(s.amount), 0) as total_paid
       FROM members m
       LEFT JOIN subscriptions s ON m.id = s.member_id AND s.status = 'paid'
       GROUP BY m.id
       ORDER BY m.full_name
     `);
-    res.json(result.rows);
+    
+    const updatedRows = result.rows.map(m => {
+      const subDebt = calculateDynamicSubscriptionDebt(m.last_paid_date || m.created_at);
+      m.total_debt = parseFloat(m.total_debt || 0) + subDebt;
+      return m;
+    });
+
+    res.json(updatedRows);
   } catch (error) {
     res.status(500).json({ error: 'تعذر جلب التقرير المحدث' });
   }
@@ -496,8 +518,16 @@ app.get('/api/admin/reports/annual', verifyToken, isAdmin, async (req, res) => {
 // ── CRUD & Member Admin Routes ──
 app.get('/api/admin/members', verifyToken, isAdmin, async (req, res) => {
   try {
-    const result = await query(`SELECT id, full_name, phone_number, membership_status, total_debt, last_paid_date, family_branch FROM members ORDER BY full_name`);
-    res.json(result.rows);
+    const result = await query(`SELECT id, full_name, phone_number, membership_status, total_debt, last_paid_date, created_at, family_branch FROM members ORDER BY full_name`);
+    
+    // 💡 تطبيق نفس المنطق في شاشة إدارة الأعضاء
+    const updatedRows = result.rows.map(m => {
+      const subDebt = calculateDynamicSubscriptionDebt(m.last_paid_date || m.created_at);
+      m.total_debt = parseFloat(m.total_debt || 0) + subDebt;
+      return m;
+    });
+
+    res.json(updatedRows);
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -579,7 +609,6 @@ app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, 
     let generatedCount = 0;
 
     for (const member of membersRes.rows) {
-      // 💡 استخدام نفس الدالة الديناميكية لحساب الاشتراكات المتأخرة لتوليد رسائل الواتساب
       const subscriptionDebt = calculateDynamicSubscriptionDebt(member.last_paid);
       const otherDebt = parseFloat(member.existing_debt);
       const totalOwed = subscriptionDebt + otherDebt;

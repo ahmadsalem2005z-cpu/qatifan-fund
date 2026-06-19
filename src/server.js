@@ -108,7 +108,6 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
     const donIncomeResult = await query(`SELECT SUM(amount) as total FROM donations`);
     const totalIncome = (parseFloat(subIncomeResult.rows[0].total) || 0) + (parseFloat(donIncomeResult.rows[0].total) || 0);
     
-    // 💡 احتساب الأعضاء الملتزمين الذين ليس عليهم أي ذمم متأخرة
     const paidThisMonthResult = await query(`SELECT COUNT(*) as paid_count FROM members WHERE membership_status = 'active' AND (total_debt IS NULL OR total_debt <= 0)`);
     const paidCount = parseInt(paidThisMonthResult.rows[0].paid_count) || 0;
     
@@ -159,7 +158,7 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
 app.get('/api/member/account', verifyToken, async (req, res) => {
   try {
     const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId) || null;
-    const result = await query(`SELECT m.*, json_agg(s ORDER BY s.subscription_year, s.subscription_month) as subscriptions FROM members m LEFT JOIN subscriptions s ON s.member_id = m.id WHERE m.id = $1 GROUP BY m.id`, [memberId]);
+    const result = await query(`SELECT m.*, json_agg(s ORDER BY s.subscription_year DESC, s.subscription_month DESC) as subscriptions FROM members m LEFT JOIN subscriptions s ON s.member_id = m.id WHERE m.id = $1 GROUP BY m.id`, [memberId]);
     res.json(result.rows[0]);
   } catch (error) { res.status(500).json({ error: 'تعذر جلب البيانات' }); }
 });
@@ -185,9 +184,9 @@ app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (re
     if (!req.file) return res.status(400).json({ error: 'لم يتم العثور على صورة' });
     const receiptUrl = req.file.path;
     const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId);
-    const month = req.body.month || null;
-    const year = req.body.year || null;
-    await query(`INSERT INTO pending_receipts (member_id, receipt_url, for_month, for_year, status) VALUES ($1, $2, $3, $4, 'pending')`, [memberId, receiptUrl, month, year]);
+    
+    // تم إلغاء استقبال for_month و for_year من التطبيق لضمان التسلسل التلقائي فقط
+    await query(`INSERT INTO pending_receipts (member_id, receipt_url, for_month, for_year, status) VALUES ($1, $2, NULL, NULL, 'pending')`, [memberId, receiptUrl]);
     res.status(200).json({ message: 'تم الرفع بنجاح', url: receiptUrl });
   } catch (err) { res.status(500).json({ error: 'حدث خطأ' }); }
 });
@@ -218,6 +217,7 @@ app.get('/api/admin/pending-receipts', verifyToken, isAdmin, async (req, res) =>
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
+// 💡 هنا التعديل المحوري لمعالجة الأشهر بالتتابع الرياضي 💡
 app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res) => {
   try {
     const receiptId = req.params.id;
@@ -226,19 +226,39 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
 
     if (paidAmount <= 0) return res.status(400).json({error: 'مبلغ غير صحيح'});
 
-    const receiptRes = await query(`SELECT member_id, for_month, for_year FROM pending_receipts WHERE id = $1`, [receiptId]);
+    const receiptRes = await query(`SELECT member_id FROM pending_receipts WHERE id = $1`, [receiptId]);
     if (receiptRes.rows.length === 0) return res.status(404).json({error: 'الإيصال غير موجود'});
     
-    const { member_id: memberId, for_month, for_year } = receiptRes.rows[0];
-    const memberRes = await query(`SELECT last_paid_date FROM members WHERE id = $1`, [memberId]);
-    const dbLastPaid = memberRes.rows[0].last_paid_date;
+    const memberId = receiptRes.rows[0].member_id;
+
+    // 1. استخراج آخر شهر فعلي مسجل في النظام لضمان التتابع (نتجاهل أي تاريخ آخر)
+    const lastSubRes = await query(`
+      SELECT subscription_year, subscription_month 
+      FROM subscriptions 
+      WHERE member_id = $1 
+      ORDER BY subscription_year DESC, subscription_month DESC 
+      LIMIT 1
+    `, [memberId]);
 
     let currentYear, currentMonth;
-    if (for_year && for_month) {
-      currentYear = parseInt(for_year, 10);
-      currentMonth = parseInt(for_month, 10);
+
+    if (lastSubRes.rows.length > 0) {
+      // بناء التسلسل مباشرة من آخر شهر مسجل في قاعدة البيانات
+      const lastYear = parseInt(lastSubRes.rows[0].subscription_year, 10);
+      const lastMonth = parseInt(lastSubRes.rows[0].subscription_month, 10);
+      
+      currentMonth = lastMonth + 1;
+      currentYear = lastYear;
+      if (currentMonth > 12) {
+        currentMonth = 1;
+        currentYear++;
+      }
     } else {
-      let baseDate = dbLastPaid ? new Date(dbLastPaid) : new Date();
+      // إذا كان عضواً جديداً لم يسبق له الدفع، نبدأ من تاريخ آخرین دفعة أو تاريخ إنشاء الحساب
+      const memberRes = await query(`SELECT last_paid_date, created_at FROM members WHERE id = $1`, [memberId]);
+      const dbLastPaid = memberRes.rows[0].last_paid_date;
+      
+      let baseDate = dbLastPaid ? new Date(dbLastPaid) : new Date(memberRes.rows[0].created_at || new Date());
       if (dbLastPaid) {
         baseDate.setMonth(baseDate.getMonth() + 1);
       } else {
@@ -252,6 +272,7 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     let monthsAdvanced = 0;
     const subscriptionsToInsert = [];
 
+    // توزيع الدفعة على الأشهر المتتابعة
     while (remainingAmount > 0) {
       const monthlyFee = (currentYear <= 2015) ? 1.00 : 2.00;
 
@@ -275,13 +296,14 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     }
 
     const finalSub = subscriptionsToInsert[subscriptionsToInsert.length - 1];
-    const formattedLastPaidDate = `${finalSub.year}-${finalSub.month}-01`;
+    const formattedLastPaidDate = `${finalSub.year}-${String(finalSub.month).padStart(2, '0')}-01`;
 
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
 
     const totalUsed = paidAmount - remainingAmount;
     await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0), last_paid_date = $2 WHERE id = $3`, [totalUsed, formattedLastPaidDate, memberId]);
 
+    // الإدراج في دفتر الاشتراكات بالتتابع الصحيح
     for (const sub of subscriptionsToInsert) {
       await query(
         `INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date) VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)`, 
@@ -497,7 +519,6 @@ app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// ── Notifications Routes (تم دمجها وإصلاحها حسب طلبك) ──
 app.get('/api/admin/notifications', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`SELECT n.*, m.full_name FROM notification_queue n JOIN members m ON n.member_id = m.id WHERE n.status = 'pending' ORDER BY n.created_at DESC`);
@@ -507,9 +528,7 @@ app.get('/api/admin/notifications', verifyToken, isAdmin, async (req, res) => {
 
 app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, res) => {
   try {
-    // إزالة التنبيهات السابقة لتجنب تكرار الإرسال
     await query(`DELETE FROM notification_queue WHERE status = 'pending'`);
-
     const membersRes = await query(`
       SELECT id, full_name, phone_number, COALESCE(total_debt, 0) as existing_debt, 
              COALESCE(last_paid_date, created_at) as last_paid
@@ -522,8 +541,6 @@ app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, 
 
     for (const member of membersRes.rows) {
       const lastPaid = new Date(member.last_paid);
-      
-      // حساب فارق الأشهر بين اليوم وآخر دفعة للعضو بدقة
       let monthsLate = (today.getFullYear() - lastPaid.getFullYear()) * 12 + (today.getMonth() - lastPaid.getMonth());
       if (monthsLate < 0) monthsLate = 0;
 
@@ -533,7 +550,6 @@ app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, 
 
       if (totalOwed > 0) {
         const message = `مرحباً ${member.full_name}، نذكركم بوجود ذمم مستحقة لصندوق العائلة بقيمة ${totalOwed} د.أ (اشتراكات متأخرة: ${subscriptionDebt} د.أ، ذمم وسلف أخرى: ${otherDebt} د.أ). يرجى المبادرة بالسداد.`;
-        
         await query(
           `INSERT INTO notification_queue (member_id, phone_number, message_body) VALUES ($1, $2, $3)`,
           [member.id, member.phone_number, message]

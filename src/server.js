@@ -150,7 +150,6 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
       balance, totalSubs, totalDons, activeMembers, totalExpenses, 
       paidPct, paidCount: committedMembersCount, expectedCount, 
       recentExpenses, totalUnpaidDebt: realTotalUnpaidDebt, 
-      // 💡 الحل هنا: تحويل أسماء المتغيرات القادمة من قاعدة البيانات لتطابق ما تطلبه الواجهة (name, amount)
       topDonorsYear: topDonorsYearResult.rows.map(d => ({ name: d.donor_name, amount: parseFloat(d.total_donated) })), 
       topDonorsAllTime: topDonorsAllTimeResult.rows.map(d => ({ name: d.donor_name, amount: parseFloat(d.total_donated) }))
     });

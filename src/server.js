@@ -30,7 +30,6 @@ app.use(cors({
 
 app.use(express.json());
 
-// ── دالة حساب الديون الديناميكية ──
 const calculateDynamicSubscriptionDebt = (lastPaidDateStr) => {
   if (!lastPaidDateStr) return 0;
   const lastPaid = new Date(lastPaidDateStr);
@@ -51,7 +50,6 @@ const calculateDynamicSubscriptionDebt = (lastPaidDateStr) => {
   return debt;
 };
 
-// ── Public & Auth Routes ──
 app.get('/api/health', (req, res) => res.status(200).json({ message: 'السيرفر يعمل!' }));
 
 app.post('/auth/login', async (req, res) => {
@@ -107,13 +105,11 @@ app.post('/auth/reset-password', async (req, res) => {
   } catch (err) { res.status(500).json({ error: "حدث خطأ" }); }
 });
 
-// ── Member Routes ──
 app.get('/api/fund/summary', verifyToken, async (req, res) => {
   try {
     const activeMembersRes = await query(`SELECT id, COALESCE(total_debt, 0) as existing_debt, COALESCE(last_paid_date, created_at) as last_paid FROM members WHERE membership_status = 'active'`);
     const activeMembers = activeMembersRes.rows.length;
     
-    // إرجاع تفاصيل الدخل مفصّلة للشفافية
     const subIncomeResult = await query(`SELECT SUM(amount) as total FROM subscriptions WHERE status = 'paid'`);
     const donIncomeResult = await query(`SELECT SUM(amount) as total FROM donations`);
     const totalSubs = parseFloat(subIncomeResult.rows[0].total) || 0;
@@ -154,7 +150,9 @@ app.get('/api/fund/summary', verifyToken, async (req, res) => {
       balance, totalSubs, totalDons, activeMembers, totalExpenses, 
       paidPct, paidCount: committedMembersCount, expectedCount, 
       recentExpenses, totalUnpaidDebt: realTotalUnpaidDebt, 
-      topDonorsYear: topDonorsYearResult.rows, topDonorsAllTime: topDonorsAllTimeResult.rows 
+      // 💡 الحل هنا: تحويل أسماء المتغيرات القادمة من قاعدة البيانات لتطابق ما تطلبه الواجهة (name, amount)
+      topDonorsYear: topDonorsYearResult.rows.map(d => ({ name: d.donor_name, amount: parseFloat(d.total_donated) })), 
+      topDonorsAllTime: topDonorsAllTimeResult.rows.map(d => ({ name: d.donor_name, amount: parseFloat(d.total_donated) }))
     });
   } catch (error) { res.status(500).json({ error: "تعذر حساب ملخص الصندوق" }); }
 });
@@ -218,7 +216,6 @@ app.get('/api/announcements', verifyToken, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// ── Admin Only Routes ──
 app.get('/api/admin/pending-receipts', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`SELECT pr.id, pr.receipt_url AS image_url, pr.created_at AS date, m.full_name, m.monthly_subscription_amount AS amount FROM pending_receipts pr JOIN members m ON pr.member_id = m.id WHERE pr.status = 'pending' ORDER BY pr.created_at DESC`);
@@ -273,8 +270,6 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     const formattedLastPaidDate = `${finalSub.year}-${String(finalSub.month).padStart(2, '0')}-01`;
 
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
-    
-    // الإصلاح المحاسبي الأهم: تم إلغاء خصم المبلغ من total_debt لعدم الازدواجية
     await query(`UPDATE members SET last_paid_date = $1 WHERE id = $2`, [formattedLastPaidDate, memberId]);
 
     for (const sub of subscriptionsToInsert) {

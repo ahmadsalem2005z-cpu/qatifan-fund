@@ -37,17 +37,11 @@ const calculateDynamicSubscriptionDebt = (lastPaidDateStr) => {
   let debt = 0;
   
   let currentYear = lastPaid.getFullYear();
-  let currentMonth = lastPaid.getMonth() + 1;
-  
-  if (currentMonth > 11) {
-    currentMonth = 0;
-    currentYear++;
-  }
-
+  let currentMonth = lastPaid.getMonth();
   const endYear = today.getFullYear();
   const endMonth = today.getMonth();
 
-  while (currentYear < endYear || (currentYear === endYear && currentMonth <= endMonth)) {
+  while (currentYear < endYear || (currentYear === endYear && currentMonth < endMonth)) {
     const fee = (currentYear <= 2015) ? 1.00 : 2.00;
     debt += fee;
     currentMonth++;
@@ -297,18 +291,15 @@ app.post('/api/admin/reject-receipt/:id', verifyToken, isAdmin, async (req, res)
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// 💡 هنا الخطأ الذي سقط سهواً وتم إصلاحه ليدخل المصروفات في سجل التدقيق
+// 💡 هنا الخطأ الفادح الذي أصلحته: تسجيل المصروفات الآن يُدرج مباشرة في جدول التدقيق (audit_logs)
 app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
   try {
     const { category, label, amount } = req.body;
     const expenseLabel = label || 'بدون وصف';
     await query(`INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`, [category, expenseLabel, amount]);
-    
-    // تم استرجاع هذا السطر:
     await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', null, 'سحب مصروف', -Math.abs(amount), `تصنيف: ${category} - ${expenseLabel}`]);
-    
     res.json({ message: 'تم التسجيل' });
-  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+  } catch (error) { logger.error(error); res.status(500).json({ error: 'خطأ' }); }
 });
 
 app.post('/api/admin/donations', verifyToken, isAdmin, async (req, res) => {
@@ -334,6 +325,7 @@ app.post('/api/admin/donations', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
+// 💡 هنا المسارات التي اختفت في رسالتي السابقة وتمت إعادتها لتحل مشكلة 404
 app.get('/api/admin/requests', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`SELECT r.*, m.full_name, m.phone_number FROM requests r JOIN members m ON r.member_id = m.id ORDER BY r.created_at DESC`);
@@ -485,7 +477,7 @@ app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
     `);
     res.json(result.rows);
   } catch (error) { 
-    console.error("Audit DB Error:", error);
+    logger.error("Audit DB Error:", error);
     res.status(500).json({ error: "تعذر جلب سجل التدقيق من قاعدة البيانات." }); 
   }
 });

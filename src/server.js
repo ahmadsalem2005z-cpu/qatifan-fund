@@ -199,7 +199,9 @@ app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (re
   try {
     if (!req.file) return res.status(400).json({ error: 'صورة مفقودة' });
     const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId);
-    await query(`INSERT INTO pending_receipts (member_id, receipt_url, status) VALUES ($1, $2, 'pending')`, [memberId, req.file.path]);
+    const month = req.body.month || null;
+    const year = req.body.year || null;
+    await query(`INSERT INTO pending_receipts (member_id, receipt_url, for_month, for_year, status) VALUES ($1, $2, $3, $4, 'pending')`, [memberId, req.file.path, month, year]);
     res.status(200).json({ message: 'تم الرفع' });
   } catch (err) { res.status(500).json({ error: 'خطأ' }); }
 });
@@ -295,10 +297,16 @@ app.post('/api/admin/reject-receipt/:id', verifyToken, isAdmin, async (req, res)
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
+// 💡 هنا الخطأ الذي سقط سهواً وتم إصلاحه ليدخل المصروفات في سجل التدقيق
 app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
   try {
     const { category, label, amount } = req.body;
-    await query(`INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`, [category, label || 'بدون وصف', amount]);
+    const expenseLabel = label || 'بدون وصف';
+    await query(`INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`, [category, expenseLabel, amount]);
+    
+    // تم استرجاع هذا السطر:
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', null, 'سحب مصروف', -Math.abs(amount), `تصنيف: ${category} - ${expenseLabel}`]);
+    
     res.json({ message: 'تم التسجيل' });
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
@@ -315,10 +323,54 @@ app.post('/api/admin/donations', verifyToken, isAdmin, async (req, res) => {
     }
     
     await query(`INSERT INTO donations (member_id, donor_name, amount) VALUES ($1, $2, $3)`, [targetMemberId, finalDonorName, amount]);
+    
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
+      ['Admin', targetMemberId, 'تسجيل تبرع', amount, note || `تبرع من: ${finalDonorName}`]);
+
     if (publish_announcement) {
         await query(`INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, 'honor', null)`, ["شكر وتقدير 🌟", `نشكر "${finalDonorName}" على تبرعه بقيمة ${amount} د.أ.`]);
     }
     res.json({ message: 'تم التسجيل' });
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.get('/api/admin/requests', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const result = await query(`SELECT r.*, m.full_name, m.phone_number FROM requests r JOIN members m ON r.member_id = m.id ORDER BY r.created_at DESC`);
+    res.json(result.rows);
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const requestId = req.params.id;
+    const requestData = await query(`SELECT * FROM requests WHERE id = $1`, [requestId]);
+    if (requestData.rows.length === 0) return res.status(404).json({ error: 'غير موجود' });
+    
+    const reqInfo = requestData.rows[0];
+    await query(`UPDATE requests SET status = $1 WHERE id = $2`, [status, requestId]);
+
+    if (status === 'approved' && reqInfo.status !== 'approved') {
+      let expenseLabel = reqInfo.type === 'loan' ? 'صرف سلفة' : 'صرف مساعدة';
+      await query(`INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`, [reqInfo.type, expenseLabel, reqInfo.amount]);
+      if (reqInfo.type === 'loan') {
+        await query(`UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE id = $2`, [reqInfo.amount, reqInfo.member_id]);
+        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', reqInfo.member_id, 'إضافة سلفة', reqInfo.amount, 'الموافقة على طلب سلفة من التطبيق']);
+      } else {
+        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', reqInfo.member_id, 'صرف مساعدة', -Math.abs(reqInfo.amount), `الموافقة على طلب: ${reqInfo.type}`]);
+      }
+    }
+    res.json({ success: true, message: 'تم التحديث' });
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { title, body, type, member_id } = req.body;
+    const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
+    await query(`INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, [title, body, type, targetMemberId]);
+    res.json({ message: 'تم النشر' });
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -421,50 +473,6 @@ app.post('/api/admin/members/bulk-dues', verifyToken, isAdmin, async (req, res) 
     res.json({ message: `تمت الإضافة بنجاح` });
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
-
-// 🚨 المسارات التي سقطت سهواً وتم استعادتها: (Requests & Announcements) 🚨
-
-app.get('/api/admin/requests', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const result = await query(`SELECT r.*, m.full_name, m.phone_number FROM requests r JOIN members m ON r.member_id = m.id ORDER BY r.created_at DESC`);
-    res.json(result.rows);
-  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
-});
-
-app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const { status } = req.body;
-    const requestId = req.params.id;
-    const requestData = await query(`SELECT * FROM requests WHERE id = $1`, [requestId]);
-    if (requestData.rows.length === 0) return res.status(404).json({ error: 'غير موجود' });
-    
-    const reqInfo = requestData.rows[0];
-    await query(`UPDATE requests SET status = $1 WHERE id = $2`, [status, requestId]);
-
-    if (status === 'approved' && reqInfo.status !== 'approved') {
-      let expenseLabel = reqInfo.type === 'loan' ? 'صرف سلفة' : 'صرف مساعدة';
-      await query(`INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`, [reqInfo.type, expenseLabel, reqInfo.amount]);
-      if (reqInfo.type === 'loan') {
-        await query(`UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE id = $2`, [reqInfo.amount, reqInfo.member_id]);
-        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', reqInfo.member_id, 'إضافة سلفة', reqInfo.amount, 'الموافقة على طلب سلفة من التطبيق']);
-      } else {
-        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', reqInfo.member_id, 'صرف مساعدة', -Math.abs(reqInfo.amount), `الموافقة على طلب: ${reqInfo.type}`]);
-      }
-    }
-    res.json({ success: true, message: 'تم التحديث' });
-  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
-});
-
-app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const { title, body, type, member_id } = req.body;
-    const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
-    await query(`INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, [title, body, type, targetMemberId]);
-    res.json({ message: 'تم النشر' });
-  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
-});
-
-// -------------------------------------------------------------------------
 
 app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
   try {

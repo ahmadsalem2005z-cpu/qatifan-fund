@@ -30,22 +30,34 @@ app.use(cors({
 
 app.use(express.json());
 
+// 💡 الدالة الديناميكية لحساب الديون (محمية ومصححة لتبدأ من الشهر التالي للدفعة الأخيرة)
 const calculateDynamicSubscriptionDebt = (lastPaidDateStr) => {
   if (!lastPaidDateStr) return 0;
   const lastPaid = new Date(lastPaidDateStr);
   const today = new Date();
   let debt = 0;
   
-  let currentYear = lastPaid.getFullYear();
-  let currentMonth = lastPaid.getMonth();
-  const endYear = today.getFullYear();
-  const endMonth = today.getMonth();
+  let targetYear = lastPaid.getFullYear();
+  let targetMonth = lastPaid.getMonth() + 1; // 1 to 12
+  
+  targetMonth++;
+  if (targetMonth > 12) {
+    targetMonth = 1;
+    targetYear++;
+  }
 
-  while (currentYear < endYear || (currentYear === endYear && currentMonth < endMonth)) {
-    const fee = (currentYear <= 2015) ? 1.00 : 2.00;
+  const currentYear = today.getFullYear();
+  const currentMonth = today.getMonth() + 1;
+
+  while (targetYear < currentYear || (targetYear === currentYear && targetMonth <= currentMonth)) {
+    const fee = (targetYear <= 2015) ? 1.00 : 2.00;
     debt += fee;
-    currentMonth++;
-    if (currentMonth > 11) { currentMonth = 0; currentYear++; }
+    
+    targetMonth++;
+    if (targetMonth > 12) {
+      targetMonth = 1;
+      targetYear++;
+    }
   }
   return debt;
 };
@@ -193,7 +205,9 @@ app.post('/api/upload-receipt', verifyToken, upload.single('receipt'), async (re
   try {
     if (!req.file) return res.status(400).json({ error: 'صورة مفقودة' });
     const memberId = (req.user && req.user.id) || (req.member && req.member.id) || (req.member && req.member.memberId);
-    await query(`INSERT INTO pending_receipts (member_id, receipt_url, status) VALUES ($1, $2, 'pending')`, [memberId, req.file.path]);
+    const month = req.body.month || null;
+    const year = req.body.year || null;
+    await query(`INSERT INTO pending_receipts (member_id, receipt_url, for_month, for_year, status) VALUES ($1, $2, $3, $4, 'pending')`, [memberId, req.file.path, month, year]);
     res.status(200).json({ message: 'تم الرفع' });
   } catch (err) { res.status(500).json({ error: 'خطأ' }); }
 });
@@ -243,9 +257,14 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
       const memberRes = await query(`SELECT last_paid_date, created_at FROM members WHERE id = $1`, [memberId]);
       const dbLastPaid = memberRes.rows[0].last_paid_date;
       let baseDate = dbLastPaid ? new Date(dbLastPaid) : new Date(memberRes.rows[0].created_at || new Date());
-      if (dbLastPaid) baseDate.setMonth(baseDate.getMonth() + 1); else baseDate.setDate(1); 
-      currentYear = baseDate.getFullYear();
-      currentMonth = baseDate.getMonth() + 1;
+      if (dbLastPaid) {
+        currentMonth = baseDate.getMonth() + 2; 
+        currentYear = baseDate.getFullYear();
+        if (currentMonth > 12) { currentMonth = 1; currentYear++; }
+      } else {
+        currentMonth = baseDate.getMonth() + 1;
+        currentYear = baseDate.getFullYear();
+      }
     }
 
     let remainingAmount = paidAmount;
@@ -271,12 +290,16 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
     await query(`UPDATE members SET last_paid_date = $1 WHERE id = $2`, [formattedLastPaidDate, memberId]);
 
+    // الباقي يخصم من السلف/الديون القديمة إن وجدت
+    if (remainingAmount > 0) {
+      await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0) WHERE id = $2`, [remainingAmount, memberId]);
+    }
+
     for (const sub of subscriptionsToInsert) {
       await query(`INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date) VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)`, [memberId, sub.year, sub.month, sub.fee]);
     }
 
-    const totalUsed = paidAmount - remainingAmount;
-    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', memberId, 'اعتماد إيصال اشتراكات', totalUsed, `تغطية ${monthsAdvanced} أشهر (حتى ${finalSub.month}/${finalSub.year})`]);
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', memberId, 'اعتماد إيصال', paidAmount, `تغطية ${monthsAdvanced} أشهر (حتى ${finalSub.month}/${finalSub.year})`]);
 
     res.json({ message: 'تم الاعتماد بنجاح', advancedMonths: monthsAdvanced });
   } catch (error) { logger.error(error); res.status(500).json({ error: 'خطأ' }); }
@@ -292,9 +315,11 @@ app.post('/api/admin/reject-receipt/:id', verifyToken, isAdmin, async (req, res)
 app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
   try {
     const { category, label, amount } = req.body;
-    await query(`INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`, [category, label || 'بدون وصف', amount]);
+    const expenseLabel = label || 'بدون وصف';
+    await query(`INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`, [category, expenseLabel, amount]);
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', null, 'سحب مصروف', -Math.abs(amount), `تصنيف: ${category} - ${expenseLabel}`]);
     res.json({ message: 'تم التسجيل' });
-  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+  } catch (error) { logger.error(error); res.status(500).json({ error: 'خطأ' }); }
 });
 
 app.post('/api/admin/donations', verifyToken, isAdmin, async (req, res) => {
@@ -309,10 +334,91 @@ app.post('/api/admin/donations', verifyToken, isAdmin, async (req, res) => {
     }
     
     await query(`INSERT INTO donations (member_id, donor_name, amount) VALUES ($1, $2, $3)`, [targetMemberId, finalDonorName, amount]);
+    
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, 
+      ['Admin', targetMemberId, 'تسجيل تبرع', amount, note || `تبرع من: ${finalDonorName}`]);
+
     if (publish_announcement) {
         await query(`INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, 'honor', null)`, ["شكر وتقدير 🌟", `نشكر "${finalDonorName}" على تبرعه بقيمة ${amount} د.أ.`]);
     }
     res.json({ message: 'تم التسجيل' });
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// 💡 هنا حل مشكلة (الارقام غير صحيحة) في التقرير السنوي
+app.get('/api/admin/reports/annual', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { year } = req.query; const targetYear = parseInt(year) || new Date().getFullYear();
+    
+    // ربط الإيرادات بسنة الاشتراك لضمان الدقة بدلاً من تاريخ الدفع
+    const subs = await query(`SELECT COALESCE(SUM(amount), 0) as total FROM subscriptions WHERE status = 'paid' AND subscription_year = $1`, [targetYear]);
+    const dons = await query(`SELECT COALESCE(SUM(amount), 0) as total FROM donations WHERE EXTRACT(YEAR FROM donation_date) = $1`, [targetYear]);
+    
+    const totalSubs = parseFloat(subs.rows[0].total);
+    const totalDons = parseFloat(dons.rows[0].total);
+    const totalIncome = totalSubs + totalDons;
+
+    const expenses = await query(`SELECT COALESCE(SUM(amount), 0) as total, category FROM expenses WHERE EXTRACT(YEAR FROM expense_date) = $1 GROUP BY category`, [targetYear]);
+    const totalExp = expenses.rows.reduce((sum, row) => sum + parseFloat(row.total), 0);
+    
+    // حساب الديون الحقيقية بالمنطق الديناميكي لتعكس القيمة الصحيحة في الـ PDF
+    const membersData = await query(`SELECT id, COALESCE(total_debt, 0) as existing_debt, COALESCE(last_paid_date, created_at) as last_paid FROM members WHERE membership_status = 'active'`);
+    let realTotalUnpaidDebt = 0;
+    for (const member of membersData.rows) {
+      const subscriptionDebt = calculateDynamicSubscriptionDebt(member.last_paid);
+      realTotalUnpaidDebt += (subscriptionDebt + parseFloat(member.existing_debt));
+    }
+    
+    res.json({ 
+      year: targetYear, 
+      total_income: totalIncome, 
+      total_subscriptions: totalSubs,
+      total_donations: totalDons,
+      total_expenses: totalExp, 
+      expenses_breakdown: expenses.rows, 
+      active_members: membersData.rows.length, 
+      total_debt: realTotalUnpaidDebt 
+    });
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.get('/api/admin/requests', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const result = await query(`SELECT r.*, m.full_name, m.phone_number FROM requests r JOIN members m ON r.member_id = m.id ORDER BY r.created_at DESC`);
+    res.json(result.rows);
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const requestId = req.params.id;
+    const requestData = await query(`SELECT * FROM requests WHERE id = $1`, [requestId]);
+    if (requestData.rows.length === 0) return res.status(404).json({ error: 'غير موجود' });
+    
+    const reqInfo = requestData.rows[0];
+    await query(`UPDATE requests SET status = $1 WHERE id = $2`, [status, requestId]);
+
+    if (status === 'approved' && reqInfo.status !== 'approved') {
+      let expenseLabel = reqInfo.type === 'loan' ? 'صرف سلفة' : 'صرف مساعدة';
+      await query(`INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`, [reqInfo.type, expenseLabel, reqInfo.amount]);
+      if (reqInfo.type === 'loan') {
+        await query(`UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE id = $2`, [reqInfo.amount, reqInfo.member_id]);
+        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', reqInfo.member_id, 'إضافة سلفة', reqInfo.amount, 'الموافقة على طلب سلفة من التطبيق']);
+      } else {
+        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', reqInfo.member_id, 'صرف مساعدة', -Math.abs(reqInfo.amount), `الموافقة على طلب: ${reqInfo.type}`]);
+      }
+    }
+    res.json({ success: true, message: 'تم التحديث' });
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { title, body, type, member_id } = req.body;
+    const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
+    await query(`INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, [title, body, type, targetMemberId]);
+    res.json({ message: 'تم النشر' });
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -323,35 +429,6 @@ app.get('/api/admin/reports/members', verifyToken, isAdmin, async (req, res) => 
       m.total_debt = parseFloat(m.total_debt || 0) + calculateDynamicSubscriptionDebt(m.last_paid_date || m.created_at);
       return m;
     }));
-  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
-});
-
-app.get('/api/admin/reports/annual', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const { year } = req.query; const targetYear = year || new Date().getFullYear();
-    
-    const subs = await query(`SELECT COALESCE(SUM(amount), 0) as total FROM subscriptions WHERE status = 'paid' AND EXTRACT(YEAR FROM payment_date) = $1`, [targetYear]);
-    const dons = await query(`SELECT COALESCE(SUM(amount), 0) as total FROM donations WHERE EXTRACT(YEAR FROM donation_date) = $1`, [targetYear]);
-    
-    const totalSubs = parseFloat(subs.rows[0].total);
-    const totalDons = parseFloat(dons.rows[0].total);
-    const totalIncome = totalSubs + totalDons;
-
-    const expenses = await query(`SELECT COALESCE(SUM(amount), 0) as total, category FROM expenses WHERE EXTRACT(YEAR FROM expense_date) = $1 GROUP BY category`, [targetYear]);
-    const totalExp = expenses.rows.reduce((sum, row) => sum + parseFloat(row.total), 0);
-    
-    const membersData = await query(`SELECT COUNT(*) as active_members, COALESCE(SUM(total_debt), 0) as total_debt FROM members WHERE membership_status = 'active'`);
-    
-    res.json({ 
-      year: targetYear, 
-      total_income: totalIncome, 
-      total_subscriptions: totalSubs,
-      total_donations: totalDons,
-      total_expenses: totalExp, 
-      expenses_breakdown: expenses.rows, 
-      active_members: parseInt(membersData.rows[0].active_members), 
-      total_debt: parseFloat(membersData.rows[0].total_debt) 
-    });
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -416,51 +493,20 @@ app.post('/api/admin/members/bulk-dues', verifyToken, isAdmin, async (req, res) 
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-app.get('/api/admin/requests', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const result = await query(`SELECT r.*, m.full_name, m.phone_number FROM requests r JOIN members m ON r.member_id = m.id ORDER BY r.created_at DESC`);
-    res.json(result.rows);
-  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
-});
-
-app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const { status } = req.body;
-    const requestId = req.params.id;
-    const requestData = await query(`SELECT * FROM requests WHERE id = $1`, [requestId]);
-    if (requestData.rows.length === 0) return res.status(404).json({ error: 'غير موجود' });
-    
-    const reqInfo = requestData.rows[0];
-    await query(`UPDATE requests SET status = $1 WHERE id = $2`, [status, requestId]);
-
-    if (status === 'approved' && reqInfo.status !== 'approved') {
-      let expenseLabel = reqInfo.type === 'loan' ? 'صرف سلفة' : 'صرف مساعدة';
-      await query(`INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`, [reqInfo.type, expenseLabel, reqInfo.amount]);
-      if (reqInfo.type === 'loan') {
-        await query(`UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE id = $2`, [reqInfo.amount, reqInfo.member_id]);
-        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', reqInfo.member_id, 'إضافة سلفة', reqInfo.amount, 'الموافقة على طلب سلفة من التطبيق']);
-      } else {
-        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', reqInfo.member_id, 'صرف مساعدة', -Math.abs(reqInfo.amount), `الموافقة على طلب: ${reqInfo.type}`]);
-      }
-    }
-    res.json({ success: true, message: 'تم التحديث' });
-  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
-});
-
-app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
-  try {
-    const { title, body, type, member_id } = req.body;
-    const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
-    await query(`INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, [title, body, type, targetMemberId]);
-    res.json({ message: 'تم النشر' });
-  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
-});
-
 app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
   try {
-    const result = await query(`SELECT a.*, COALESCE(m.full_name, 'الصندوق العام') as full_name FROM audit_logs a LEFT JOIN members m ON a.member_id = m.id ORDER BY a.created_at DESC LIMIT 200`);
+    const result = await query(`
+      SELECT a.id, a.admin_id, a.member_id, a.action, a.amount, a.reason, a.created_at, 
+             COALESCE(m.full_name, 'الصندوق العام') as full_name 
+      FROM audit_logs a 
+      LEFT JOIN members m ON a.member_id = m.id 
+      ORDER BY a.created_at DESC LIMIT 200
+    `);
     res.json(result.rows);
-  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+  } catch (error) { 
+    console.error("Audit DB Error:", error);
+    res.status(500).json({ error: "تعذر جلب سجل التدقيق من قاعدة البيانات." }); 
+  }
 });
 
 app.get('/api/admin/notifications', verifyToken, isAdmin, async (req, res) => {
@@ -480,7 +526,7 @@ app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, 
       const otherDebt = parseFloat(member.existing_debt);
       const totalOwed = subscriptionDebt + otherDebt;
       if (totalOwed > 0) {
-        await query(`INSERT INTO notification_queue (member_id, phone_number, message_body) VALUES ($1, $2, $3)`, [member.id, member.phone_number, `مرحباً ${member.full_name}، نذكركم بوجود ذمم مستحقة بقيمة ${totalOwed} د.أ (اشتراكات: ${subscriptionDebt}، أخرى: ${otherDebt}).`]);
+        await query(`INSERT INTO notification_queue (member_id, phone_number, message_body) VALUES ($1, $2, $3)`, [member.id, member.phone_number, `مرحباً ${member.full_name}، نذكركم بوجود ذمم مستحقة بقيمة ${totalOwed} د.أ.`]);
         generatedCount++;
       }
     }
@@ -515,6 +561,7 @@ const initializeDB = async () => {
     await query(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS member_id UUID`);
     await query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS family_branch VARCHAR(100) DEFAULT 'غير محدد'`);
     await query(`CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, admin_id VARCHAR(50) DEFAULT 'Admin', member_id UUID REFERENCES members(id) ON DELETE SET NULL, action VARCHAR(100), amount DECIMAL(10,2), reason TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+    await query(`ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS member_id UUID REFERENCES members(id) ON DELETE SET NULL`);
     await query(`CREATE TABLE IF NOT EXISTS notification_queue (id SERIAL PRIMARY KEY, member_id UUID REFERENCES members(id) ON DELETE CASCADE, phone_number VARCHAR(20) NOT NULL, message_body TEXT NOT NULL, status VARCHAR(20) DEFAULT 'pending', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, processed_at TIMESTAMP)`);
     await query(`CREATE TABLE IF NOT EXISTS donations (id SERIAL PRIMARY KEY, member_id UUID REFERENCES members(id) ON DELETE SET NULL, donor_name VARCHAR(255), amount DECIMAL(10,2) NOT NULL, donation_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
   } catch (e) { logger.error("DB Init Error:", e); }

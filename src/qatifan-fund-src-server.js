@@ -37,17 +37,11 @@ const calculateDynamicSubscriptionDebt = (lastPaidDateStr) => {
   let debt = 0;
   
   let currentYear = lastPaid.getFullYear();
-  let currentMonth = lastPaid.getMonth() + 1;
-  
-  if (currentMonth > 11) {
-    currentMonth = 0;
-    currentYear++;
-  }
-
+  let currentMonth = lastPaid.getMonth();
   const endYear = today.getFullYear();
   const endMonth = today.getMonth();
 
-  while (currentYear < endYear || (currentYear === endYear && currentMonth <= endMonth)) {
+  while (currentYear < endYear || (currentYear === endYear && currentMonth < endMonth)) {
     const fee = (currentYear <= 2015) ? 1.00 : 2.00;
     debt += fee;
     currentMonth++;
@@ -282,7 +276,7 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     }
 
     const totalUsed = paidAmount - remainingAmount;
-    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', memberId, 'اعتماد إيصال', totalUsed, `تغطية ${monthsAdvanced} أشهر (حتى ${finalSub.month}/${finalSub.year})`]);
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', memberId, 'اعتماد إيصال اشتراكات', totalUsed, `تغطية ${monthsAdvanced} أشهر (حتى ${finalSub.month}/${finalSub.year})`]);
 
     res.json({ message: 'تم الاعتماد بنجاح', advancedMonths: monthsAdvanced });
   } catch (error) { logger.error(error); res.status(500).json({ error: 'خطأ' }); }
@@ -422,21 +416,51 @@ app.post('/api/admin/members/bulk-dues', verifyToken, isAdmin, async (req, res) 
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// 💡 تحديث مسار جلب السجل ليعيد الخطأ بدقة في حال وجوده بدلاً من كلمة "خطأ" العامة
+app.get('/api/admin/requests', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const result = await query(`SELECT r.*, m.full_name, m.phone_number FROM requests r JOIN members m ON r.member_id = m.id ORDER BY r.created_at DESC`);
+    res.json(result.rows);
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.post('/api/admin/requests/:id/status', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const requestId = req.params.id;
+    const requestData = await query(`SELECT * FROM requests WHERE id = $1`, [requestId]);
+    if (requestData.rows.length === 0) return res.status(404).json({ error: 'غير موجود' });
+    
+    const reqInfo = requestData.rows[0];
+    await query(`UPDATE requests SET status = $1 WHERE id = $2`, [status, requestId]);
+
+    if (status === 'approved' && reqInfo.status !== 'approved') {
+      let expenseLabel = reqInfo.type === 'loan' ? 'صرف سلفة' : 'صرف مساعدة';
+      await query(`INSERT INTO expenses (category, label, amount) VALUES ($1, $2, $3)`, [reqInfo.type, expenseLabel, reqInfo.amount]);
+      if (reqInfo.type === 'loan') {
+        await query(`UPDATE members SET total_debt = COALESCE(total_debt, 0) + $1 WHERE id = $2`, [reqInfo.amount, reqInfo.member_id]);
+        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', reqInfo.member_id, 'إضافة سلفة', reqInfo.amount, 'الموافقة على طلب سلفة من التطبيق']);
+      } else {
+        await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', reqInfo.member_id, 'صرف مساعدة', -Math.abs(reqInfo.amount), `الموافقة على طلب: ${reqInfo.type}`]);
+      }
+    }
+    res.json({ success: true, message: 'تم التحديث' });
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.post('/api/admin/announcements', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { title, body, type, member_id } = req.body;
+    const targetMemberId = (typeof member_id === 'string' && member_id.trim() !== "") ? member_id.trim() : null;
+    await query(`INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, $3, $4)`, [title, body, type, targetMemberId]);
+    res.json({ message: 'تم النشر' });
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
+});
+
 app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
   try {
-    const result = await query(`
-      SELECT a.id, a.admin_id, a.member_id, a.action, a.amount, a.reason, a.created_at, 
-             COALESCE(m.full_name, 'الصندوق العام') as full_name 
-      FROM audit_logs a 
-      LEFT JOIN members m ON a.member_id = m.id 
-      ORDER BY a.created_at DESC LIMIT 200
-    `);
+    const result = await query(`SELECT a.*, COALESCE(m.full_name, 'الصندوق العام') as full_name FROM audit_logs a LEFT JOIN members m ON a.member_id = m.id ORDER BY a.created_at DESC LIMIT 200`);
     res.json(result.rows);
-  } catch (error) { 
-    console.error("Audit DB Error:", error);
-    res.status(500).json({ error: "تعذر جلب سجل التدقيق من قاعدة البيانات." }); 
-  }
+  } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
 app.get('/api/admin/notifications', verifyToken, isAdmin, async (req, res) => {
@@ -456,7 +480,7 @@ app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, 
       const otherDebt = parseFloat(member.existing_debt);
       const totalOwed = subscriptionDebt + otherDebt;
       if (totalOwed > 0) {
-        await query(`INSERT INTO notification_queue (member_id, phone_number, message_body) VALUES ($1, $2, $3)`, [member.id, member.phone_number, `مرحباً ${member.full_name}، نذكركم بوجود ذمم مستحقة بقيمة ${totalOwed} د.أ.`]);
+        await query(`INSERT INTO notification_queue (member_id, phone_number, message_body) VALUES ($1, $2, $3)`, [member.id, member.phone_number, `مرحباً ${member.full_name}، نذكركم بوجود ذمم مستحقة بقيمة ${totalOwed} د.أ (اشتراكات: ${subscriptionDebt}، أخرى: ${otherDebt}).`]);
         generatedCount++;
       }
     }
@@ -491,9 +515,6 @@ const initializeDB = async () => {
     await query(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS member_id UUID`);
     await query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS family_branch VARCHAR(100) DEFAULT 'غير محدد'`);
     await query(`CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, admin_id VARCHAR(50) DEFAULT 'Admin', member_id UUID REFERENCES members(id) ON DELETE SET NULL, action VARCHAR(100), amount DECIMAL(10,2), reason TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
-    // 💡 حماية إضافية للبيانات
-    await query(`ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS member_id UUID REFERENCES members(id) ON DELETE SET NULL`);
-    
     await query(`CREATE TABLE IF NOT EXISTS notification_queue (id SERIAL PRIMARY KEY, member_id UUID REFERENCES members(id) ON DELETE CASCADE, phone_number VARCHAR(20) NOT NULL, message_body TEXT NOT NULL, status VARCHAR(20) DEFAULT 'pending', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, processed_at TIMESTAMP)`);
     await query(`CREATE TABLE IF NOT EXISTS donations (id SERIAL PRIMARY KEY, member_id UUID REFERENCES members(id) ON DELETE SET NULL, donor_name VARCHAR(255), amount DECIMAL(10,2) NOT NULL, donation_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
   } catch (e) { logger.error("DB Init Error:", e); }

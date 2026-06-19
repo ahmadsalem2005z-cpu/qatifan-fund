@@ -245,9 +245,14 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
       const memberRes = await query(`SELECT last_paid_date, created_at FROM members WHERE id = $1`, [memberId]);
       const dbLastPaid = memberRes.rows[0].last_paid_date;
       let baseDate = dbLastPaid ? new Date(dbLastPaid) : new Date(memberRes.rows[0].created_at || new Date());
-      if (dbLastPaid) baseDate.setMonth(baseDate.getMonth() + 1); else baseDate.setDate(1); 
-      currentYear = baseDate.getFullYear();
-      currentMonth = baseDate.getMonth() + 1;
+      if (dbLastPaid) {
+        currentMonth = baseDate.getMonth() + 2; 
+        currentYear = baseDate.getFullYear();
+        if (currentMonth > 12) { currentMonth = 1; currentYear++; }
+      } else {
+        currentMonth = baseDate.getMonth() + 1;
+        currentYear = baseDate.getFullYear();
+      }
     }
 
     let remainingAmount = paidAmount;
@@ -271,14 +276,15 @@ app.post('/api/admin/approve-receipt/:id', verifyToken, isAdmin, async (req, res
     const formattedLastPaidDate = `${finalSub.year}-${String(finalSub.month).padStart(2, '0')}-01`;
 
     await query(`UPDATE pending_receipts SET status = 'approved' WHERE id = $1`, [receiptId]);
-    await query(`UPDATE members SET last_paid_date = $1 WHERE id = $2`, [formattedLastPaidDate, memberId]);
+    
+    // 💡 الإصلاح الجذري لمشكلة الديون المعلقة: نقوم بخصم المبلغ المدفوع من حقل الديون المتراكمة القديمة 
+    await query(`UPDATE members SET total_debt = GREATEST(COALESCE(total_debt, 0) - $1, 0), last_paid_date = $2 WHERE id = $3`, [paidAmount, formattedLastPaidDate, memberId]);
 
     for (const sub of subscriptionsToInsert) {
       await query(`INSERT INTO subscriptions (member_id, subscription_year, subscription_month, amount, status, payment_date) VALUES ($1, $2, $3, $4, 'paid', CURRENT_TIMESTAMP)`, [memberId, sub.year, sub.month, sub.fee]);
     }
 
-    const totalUsed = paidAmount - remainingAmount;
-    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', memberId, 'اعتماد إيصال', totalUsed, `تغطية ${monthsAdvanced} أشهر (حتى ${finalSub.month}/${finalSub.year})`]);
+    await query(`INSERT INTO audit_logs (admin_id, member_id, action, amount, reason) VALUES ($1, $2, $3, $4, $5)`, ['Admin', memberId, 'اعتماد إيصال', paidAmount, `تغطية ${monthsAdvanced} أشهر (حتى ${finalSub.month}/${finalSub.year})`]);
 
     res.json({ message: 'تم الاعتماد بنجاح', advancedMonths: monthsAdvanced });
   } catch (error) { logger.error(error); res.status(500).json({ error: 'خطأ' }); }
@@ -301,7 +307,6 @@ app.post('/api/admin/expenses', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { logger.error(error); res.status(500).json({ error: 'خطأ' }); }
 });
 
-// 💡 هنا غيرنا رسالة إعلان التبرع للغة الفلاحية الفلسطينية الدافئة
 app.post('/api/admin/donations', verifyToken, isAdmin, async (req, res) => {
   try {
     const { member_id, donor_name, amount, note, publish_announcement } = req.body;
@@ -319,7 +324,7 @@ app.post('/api/admin/donations', verifyToken, isAdmin, async (req, res) => {
       ['Admin', targetMemberId, 'تسجيل تبرع', amount, note || `تبرع من: ${finalDonorName}`]);
 
     if (publish_announcement) {
-        await query(`INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, 'honor', null)`, ["خلف الله عليك يا غالي 🌟", `كل الشكر والتقدير لقرابتنا النشمي "${finalDonorName}" اللي جاد على صندوق العيلة بتبرع طيب قيمته ${amount} دينار.\n\nيخلف عليك ويكثر خيرك، وربنا يبارك بمالك وعيالك ويجعلها بميزان حسناتك يا أصيل 🫒.`]);
+        await query(`INSERT INTO announcements (title, body, type, member_id) VALUES ($1, $2, 'honor', null)`, ["شكر وتقدير 🌟", `نشكر "${finalDonorName}" على تبرعه بقيمة ${amount} د.أ.`]);
     }
     res.json({ message: 'تم التسجيل' });
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
@@ -481,7 +486,7 @@ app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
     `);
     res.json(result.rows);
   } catch (error) { 
-    logger.error("Audit DB Error:", error);
+    console.error("Audit DB Error:", error);
     res.status(500).json({ error: "تعذر جلب سجل التدقيق من قاعدة البيانات." }); 
   }
 });
@@ -493,7 +498,6 @@ app.get('/api/admin/notifications', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'تعذر الجلب' }); }
 });
 
-// 💡 هنا غيرنا رسائل التذكير على الواتساب للغة الفلاحية الفلسطينية الأصيلة (فزعة وكتف بكتف)
 app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, res) => {
   try {
     await query(`DELETE FROM notification_queue WHERE status = 'pending'`);

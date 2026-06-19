@@ -497,11 +497,56 @@ app.get('/api/admin/audit-logs', verifyToken, isAdmin, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'خطأ' }); }
 });
 
+// ── Notifications Routes (تم دمجها وإصلاحها حسب طلبك) ──
 app.get('/api/admin/notifications', verifyToken, isAdmin, async (req, res) => {
   try {
     const result = await query(`SELECT n.*, m.full_name FROM notification_queue n JOIN members m ON n.member_id = m.id WHERE n.status = 'pending' ORDER BY n.created_at DESC`);
     res.json(result.rows);
   } catch (error) { res.status(500).json({ error: 'تعذر الجلب' }); }
+});
+
+app.post('/api/admin/notifications/generate', verifyToken, isAdmin, async (req, res) => {
+  try {
+    // إزالة التنبيهات السابقة لتجنب تكرار الإرسال
+    await query(`DELETE FROM notification_queue WHERE status = 'pending'`);
+
+    const membersRes = await query(`
+      SELECT id, full_name, phone_number, COALESCE(total_debt, 0) as existing_debt, 
+             COALESCE(last_paid_date, created_at) as last_paid
+      FROM members 
+      WHERE membership_status = 'active'
+    `);
+
+    let generatedCount = 0;
+    const today = new Date();
+
+    for (const member of membersRes.rows) {
+      const lastPaid = new Date(member.last_paid);
+      
+      // حساب فارق الأشهر بين اليوم وآخر دفعة للعضو بدقة
+      let monthsLate = (today.getFullYear() - lastPaid.getFullYear()) * 12 + (today.getMonth() - lastPaid.getMonth());
+      if (monthsLate < 0) monthsLate = 0;
+
+      const subscriptionDebt = monthsLate * 2.00;
+      const otherDebt = parseFloat(member.existing_debt);
+      const totalOwed = subscriptionDebt + otherDebt;
+
+      if (totalOwed > 0) {
+        const message = `مرحباً ${member.full_name}، نذكركم بوجود ذمم مستحقة لصندوق العائلة بقيمة ${totalOwed} د.أ (اشتراكات متأخرة: ${subscriptionDebt} د.أ، ذمم وسلف أخرى: ${otherDebt} د.أ). يرجى المبادرة بالسداد.`;
+        
+        await query(
+          `INSERT INTO notification_queue (member_id, phone_number, message_body) VALUES ($1, $2, $3)`,
+          [member.id, member.phone_number, message]
+        );
+        generatedCount++;
+      }
+    }
+
+    res.json({ success: true, message: `تم توليد ${generatedCount} رسالة للمتعثرين` });
+  } catch (error) {
+    logger.error('Error generating notifications:', error);
+    res.status(500).json({ error: 'تعذر توليد قائمة المتعثرين' });
+  }
 });
 
 app.post('/api/admin/notifications/:id/sent', verifyToken, isAdmin, async (req, res) => {
